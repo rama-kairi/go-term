@@ -90,21 +90,21 @@ func main() {
 	// Register create terminal session tool with enhanced features
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "create_terminal_session",
-		Description: "Create a new terminal session with project association and comprehensive tracking. Project IDs are auto-generated based on current directory (format: folder_name_with_underscores_RANDOM). Use this to start organized terminal work within projects. SOLVES VSCode Copilot Issues: (1) Session isolation prevents interference between concurrent tasks, (2) Reliable session management without state loss, (3) Project-based organization for better workflow management. Each session maintains independent working directory and environment state.",
+		Description: "Create a new terminal session for executing commands. Sessions isolate work by project and maintain persistent environment state. Use this to start organized terminal work within projects - project IDs are automatically generated from the current directory. Each session tracks command history and maintains independent working directories.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"name": {
 					Type:        "string",
-					Description: "The name of the terminal session to create. Should be descriptive and meaningful for your project work.",
+					Description: "Descriptive name for the terminal session (e.g., 'main-dev', 'testing', 'build-process').",
 				},
 				"project_id": {
 					Type:        "string",
-					Description: "Optional project ID to associate with this session. If not provided, will be auto-generated based on current directory. Format: folder_name_with_underscores_RANDOM (e.g., my_project_a7b3c9)",
+					Description: "Optional: Custom project ID to group related sessions. Auto-generated from directory name if not provided.",
 				},
 				"working_dir": {
 					Type:        "string",
-					Description: "Optional working directory for the session. If not provided, uses current directory. This affects project ID generation.",
+					Description: "Optional: Starting directory for the session. Uses current directory if not specified.",
 				},
 			},
 			Required: []string{"name"},
@@ -114,7 +114,7 @@ func main() {
 	// Register list terminal sessions tool with enhanced information
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_terminal_sessions",
-		Description: "List all existing terminal sessions with comprehensive information including project association, command statistics, and session health. Use this to see all active sessions and their status. SOLVES VSCode Copilot Issues: (1) Clear session visibility and management, (2) Prevents confusion about which terminals are running what processes, (3) Shows command execution statistics and success rates for troubleshooting, (4) Project-based grouping for better organization. Helps avoid the common VSCode Copilot issue of running commands in terminals with active background processes.",
+		Description: "List all active terminal sessions with status information, command statistics, and project grouping. Use this to see which sessions are available for running commands, check session health, and avoid conflicts with busy terminals running background processes.",
 		InputSchema: &jsonschema.Schema{
 			Type:       "object",
 			Properties: map[string]*jsonschema.Schema{},
@@ -124,25 +124,25 @@ func main() {
 	// Register run command tool with enhanced tracking
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_command",
-		Description: "Execute a command in a specific terminal session with comprehensive tracking, intelligent package management, and automatic background execution for long-running processes. KEY FEATURES: (1) AUTOMATIC BACKGROUND DETECTION - Long-running processes (dev servers, HTTP servers, file watchers) are automatically detected and executed in isolated background sessions to prevent blocking, (2) Intelligent package manager optimization (prefers bun for Node.js, uv for Python), (3) Security validation and command enhancement, (4) Complete command history tracking. AUTOMATIC BACKGROUND TRIGGERS: Python scripts containing 'server', 'http_server', 'app.py', Flask/Django/FastAPI apps; Node.js scripts with 'server.js', 'app.js', Express/Fastify apps; Commands with 'dev', 'serve', 'start', 'watch'. SOLVES VSCode Copilot Issues: (1) Prevents hanging on long-running processes, (2) Reliable output capture, (3) Proper session isolation, (4) Background process management. Use 'is_background: false' to force foreground execution if needed.",
+		Description: "Execute commands in terminal sessions with automatic background detection for long-running processes. Automatically detects and runs development servers, build watchers, and other long-running processes in background mode to prevent blocking. Regular commands run in foreground with immediate output. Includes intelligent package manager detection and security validation.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "The UUID4 identifier of the terminal session to run the command in. Use list_terminal_sessions to see available sessions.",
+					Description: "Session ID to run the command in. Use list_terminal_sessions to see available sessions.",
 				},
 				"command": {
 					Type:        "string",
-					Description: "The command to execute. AUTOMATIC BACKGROUND DETECTION: Commands containing server scripts (http_server.py, server.js, app.py, dev servers) are automatically executed in background sessions to prevent blocking. Enhanced with intelligent package manager detection (prefers bun for Node.js, uv for Python). Directory changes (cd) persist across commands.",
+					Description: "Command to execute. Development servers and long-running processes are automatically detected and run in background mode.",
 				},
 				"is_background": {
 					Type:        "boolean",
-					Description: "Optional: Override automatic background detection. Set to 'false' to force foreground execution of detected long-running processes, or 'true' to force background execution of regular commands.",
+					Description: "Optional: Force background (true) or foreground (false) execution. Leave empty for automatic detection.",
 				},
 				"timeout_test": {
 					Type:        "boolean",
-					Description: "Optional: Test command with 10-second timeout to verify responsiveness before full execution. Useful for potentially hanging commands.",
+					Description: "Optional: Test command responsiveness with 10-second timeout before full execution.",
 				},
 			},
 			Required: []string{"session_id", "command"},
@@ -152,62 +152,62 @@ func main() {
 	// Register search history tool for command discovery
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_terminal_history",
-		Description: "Search through command history across all terminal sessions and projects. Use this to quickly find previously executed commands, check command outputs, analyze patterns, or troubleshoot issues. Supports filtering by project, session, command text, output text, success status, time range, and more. SOLVES VSCode Copilot Issues: (1) Persistent command history that doesn't get lost between sessions, (2) Advanced search capabilities to find specific commands or outputs, (3) Project-based filtering for organized workflow management, (4) Success/failure analysis for debugging. Unlike VSCode's limited terminal history, this provides comprehensive searchable records.",
+		Description: "Search command history across all sessions and projects to find previously executed commands, analyze outputs, and troubleshoot issues. Supports filtering by project, session, command text, output content, success status, and time ranges. Essential for debugging and finding patterns in command execution.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "Filter by specific session ID. Leave empty to search all sessions.",
+					Description: "Filter by session ID. Leave empty to search all sessions.",
 				},
 				"project_id": {
 					Type:        "string",
-					Description: "Filter by specific project ID. Leave empty to search all projects. Use this to focus on commands from a particular project.",
+					Description: "Filter by project ID. Leave empty to search all projects.",
 				},
 				"command": {
 					Type:        "string",
-					Description: "Search for commands containing this text (case-insensitive partial match). Use this to find specific commands or command patterns.",
+					Description: "Search for commands containing this text (case-insensitive).",
 				},
 				"output": {
 					Type:        "string",
-					Description: "Search for commands with output containing this text (case-insensitive partial match). Useful for finding commands that produced specific results or errors.",
+					Description: "Search for commands with output containing this text (case-insensitive).",
 				},
 				"success": {
 					Type:        "boolean",
-					Description: "Filter by success status: true for successful commands, false for failed commands, omit for all commands.",
+					Description: "Filter by success status: true for successful, false for failed commands.",
 				},
 				"start_time": {
 					Type:        "string",
-					Description: "Find commands executed after this time (ISO 8601 format: 2006-01-02T15:04:05Z). Use this to focus on recent activity.",
+					Description: "Find commands after this time (ISO 8601: 2006-01-02T15:04:05Z).",
 				},
 				"end_time": {
 					Type:        "string",
-					Description: "Find commands executed before this time (ISO 8601 format: 2006-01-02T15:04:05Z). Use this to limit search to a specific time period.",
+					Description: "Find commands before this time (ISO 8601: 2006-01-02T15:04:05Z).",
 				},
 				"working_dir": {
 					Type:        "string",
-					Description: "Filter by working directory path (partial match). Use this to find commands executed in specific directories.",
+					Description: "Filter by working directory (partial match).",
 				},
 				"tags": {
 					Type:        "array",
 					Items:       &jsonschema.Schema{Type: "string"},
-					Description: "Filter by tags (commands must have all specified tags). Tags can be added to commands for better organization.",
+					Description: "Filter by tags (commands must have all specified tags).",
 				},
 				"limit": {
 					Type:        "integer",
-					Description: "Maximum number of results to return (default: 100, max: 1000). Use lower values for faster responses.",
+					Description: "Maximum results to return (default: 100, max: 1000).",
 				},
 				"sort_by": {
 					Type:        "string",
-					Description: "Sort results by: 'time' (default), 'duration', or 'command'. Time sorts by execution time, duration by how long commands took.",
+					Description: "Sort by: 'time' (default), 'duration', or 'command'.",
 				},
 				"sort_desc": {
 					Type:        "boolean",
-					Description: "Sort in descending order (default: true for time-based sorting). Use false for ascending order.",
+					Description: "Sort in descending order (default: true).",
 				},
 				"include_output": {
 					Type:        "boolean",
-					Description: "Include command output in results (default: false to reduce response size). Set to true when searching by output content or when you need to see command results.",
+					Description: "Include command output in results (default: false).",
 				},
 			},
 		},
@@ -216,21 +216,21 @@ func main() {
 	// Register delete session tool for session management
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delete_session",
-		Description: "Delete terminal sessions (individual or all sessions for a project) with confirmation requirement. Use this to clean up old sessions or remove all sessions for a completed project. Requires explicit confirmation to prevent accidental deletion.",
+		Description: "Delete terminal sessions individually or by project with confirmation requirement. Use this to clean up completed work and free resources. Requires explicit confirmation to prevent accidental deletion of active sessions.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "The UUID4 identifier of the session to delete. Leave empty to delete by project. Cannot be used together with project_id.",
+					Description: "Session ID to delete. Leave empty to delete by project_id instead.",
 				},
 				"project_id": {
 					Type:        "string",
-					Description: "Delete all sessions for this project ID. Leave empty to delete by session ID. Cannot be used together with session_id.",
+					Description: "Delete all sessions for this project. Leave empty to delete by session_id instead.",
 				},
 				"confirm": {
 					Type:        "boolean",
-					Description: "Confirmation flag to prevent accidental deletion. Must be set to true to proceed with deletion.",
+					Description: "Must be true to confirm deletion and prevent accidents.",
 				},
 			},
 			Required: []string{"confirm"},
@@ -240,17 +240,17 @@ func main() {
 	// Register background process monitoring tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "check_background_process",
-		Description: "Check the output and status of background processes for agents. This allows agents to monitor long-running processes like development servers, HTTP servers, and other background tasks that were started with automatic background detection. SOLVES VSCode Copilot Issues: (1) Agents can check output of background processes without losing context, (2) Monitor status of dev servers and long-running tasks, (3) Retrieve output from processes that were started in background sessions.",
+		Description: "Monitor background processes started by run_command to check their status, output, and health. Essential for tracking development servers, build processes, and other long-running tasks without blocking the main workflow.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "The UUID4 identifier of the session running the background process.",
+					Description: "Session ID where the background process is running.",
 				},
 				"process_id": {
 					Type:        "string",
-					Description: "Optional background process ID. If not provided will check the latest background process for the session.",
+					Description: "Optional: Specific process ID. If not provided, checks the latest background process.",
 				},
 			},
 			Required: []string{"session_id"},
@@ -261,12 +261,12 @@ func main() {
 		"tools_count": 6,
 	})
 	appLogger.Info("Available tools:")
-	appLogger.Info("  - create_terminal_session: Create a new terminal session with project association and comprehensive tracking")
-	appLogger.Info("  - list_terminal_sessions: List all existing terminal sessions with detailed information and statistics")
-	appLogger.Info("  - run_command: Execute a command in a specific terminal session with full history tracking")
-	appLogger.Info("  - search_terminal_history: Search through command history across all sessions and projects")
-	appLogger.Info("  - delete_session: Delete terminal sessions (individual or project-wide) with confirmation")
-	appLogger.Info("  - check_background_process: Check output and status of background processes for agents")
+	appLogger.Info("  - create_terminal_session: Create isolated terminal sessions for organized project work")
+	appLogger.Info("  - list_terminal_sessions: View all sessions with status and statistics")
+	appLogger.Info("  - run_command: Execute commands with automatic background detection")
+	appLogger.Info("  - search_terminal_history: Find and analyze previous commands across projects")
+	appLogger.Info("  - delete_session: Clean up sessions individually or by project")
+	appLogger.Info("  - check_background_process: Monitor long-running background processes")
 
 	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
