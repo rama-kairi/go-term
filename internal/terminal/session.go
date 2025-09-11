@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,6 +114,11 @@ type Session struct {
 	currentDir string
 	shellPid   int
 	shellEnv   map[string]string
+}
+
+// GetCurrentDir returns the current working directory of the session
+func (s *Session) GetCurrentDir() string {
+	return s.currentDir
 }
 
 // Manager manages terminal sessions with project organization and command history
@@ -840,12 +846,40 @@ func (m *Manager) CloseSession(sessionID string) error {
 		session.cmd.Wait()
 	}
 
+	// Clean up background processes
+	for processID, bgProcess := range session.BackgroundProcesses {
+		if bgProcess.cmd != nil && bgProcess.cmd.Process != nil && bgProcess.IsRunning {
+			bgProcess.cmd.Process.Kill()
+			bgProcess.cmd.Wait()
+			m.logger.Info("Killed background process", map[string]interface{}{
+				"session_id": sessionID,
+				"process_id": processID,
+				"command":    bgProcess.Command,
+			})
+		}
+	}
+
+	// Clean up database records
+	if m.database != nil {
+		if err := m.database.DeleteSession(sessionID); err != nil {
+			m.logger.Error("Failed to delete session from database", err, map[string]interface{}{
+				"session_id": sessionID,
+			})
+			// Don't return error here as we still want to clean up the in-memory session
+		}
+	}
+
 	// Log session closure with statistics
+	successRate := 0.0
+	if session.CommandCount > 0 {
+		successRate = float64(session.SuccessCount) / float64(session.CommandCount)
+	}
+
 	m.logger.LogSessionEvent("closed", sessionID, session.Name, map[string]interface{}{
 		"project_id":       session.ProjectID,
 		"command_count":    session.CommandCount,
 		"success_count":    session.SuccessCount,
-		"success_rate":     float64(session.SuccessCount) / float64(session.CommandCount),
+		"success_rate":     successRate,
 		"total_duration":   session.TotalDuration.String(),
 		"session_duration": time.Since(session.CreatedAt).String(),
 	})
@@ -1279,7 +1313,7 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 
 		// Create the command with proper working directory and environment
 		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-		cmd.Dir = session.WorkingDir
+		cmd.Dir = session.currentDir
 
 		// Set environment variables
 		cmd.Env = make([]string, 0, len(session.Environment))
@@ -1320,33 +1354,43 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 		bgProcess.PID = cmd.Process.Pid
 		bgProcess.Mutex.Unlock()
 
-		// Start goroutines to capture output
+		// Use WaitGroup to wait for output capture goroutines
+		var outputWg sync.WaitGroup
+		outputWg.Add(2)
+
+		// Start goroutines to capture output with proper buffering
 		go func() {
-			scanner := make([]byte, 1024)
-			for {
-				n, err := stdout.Read(scanner)
-				if err != nil {
-					break
-				}
+			defer outputWg.Done()
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
 				// Use the new method that applies output limiting
-				bgProcess.UpdateOutput(string(scanner[:n]), m.config.Session.BackgroundOutputLimit)
+				bgProcess.UpdateOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
+			}
+			// Handle any scanning errors (but EOF is normal)
+			if err := scanner.Err(); err != nil {
+				m.logger.Error("Error reading stdout from background process", err)
 			}
 		}()
 
 		go func() {
-			scanner := make([]byte, 1024)
-			for {
-				n, err := stderr.Read(scanner)
-				if err != nil {
-					break
-				}
+			defer outputWg.Done()
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
 				// Use the new method that applies output limiting
-				bgProcess.UpdateErrorOutput(string(scanner[:n]), m.config.Session.BackgroundOutputLimit)
+				bgProcess.UpdateErrorOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
+			}
+			// Handle any scanning errors (but EOF is normal)
+			if err := scanner.Err(); err != nil {
+				m.logger.Error("Error reading stderr from background process", err)
 			}
 		}()
 
 		// Wait for command completion
 		execErr := cmd.Wait()
+
+		// Wait for output capture goroutines to complete
+		outputWg.Wait()
+
 		endTime := time.Now()
 		duration := endTime.Sub(startTime)
 		exitCode := 0

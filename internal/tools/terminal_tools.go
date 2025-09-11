@@ -253,15 +253,16 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 		return createErrorResult(fmt.Sprintf("Session not found: %v. Tip: Use 'list_terminal_sessions' to see all available sessions and their IDs. Make sure to create a session first with 'create_terminal_session'.", err)), RunCommandResult{}, nil
 	}
 
-	// Detect package manager and project type
+	// Detect package manager and project type using current directory
 	packageManager := ""
-	projectType := t.packageManager.DetectProjectType(session.WorkingDir)
-	if pm, err := t.packageManager.DetectPackageManager(session.WorkingDir); err == nil && pm != nil {
+	currentWorkingDir := session.GetCurrentDir()
+	projectType := t.packageManager.DetectProjectType(currentWorkingDir)
+	if pm, err := t.packageManager.DetectPackageManager(currentWorkingDir); err == nil && pm != nil {
 		packageManager = pm.Name
 	}
 
 	// Enhance command with package manager intelligence
-	enhancedCommand := t.enhanceCommandWithPackageManager(args.Command, session.WorkingDir)
+	enhancedCommand := t.enhanceCommandWithPackageManager(args.Command, currentWorkingDir)
 
 	// Determine if this should be a background process
 	shouldRunInBackground := args.IsBackground || t.shouldAutoDetectBackground(enhancedCommand)
