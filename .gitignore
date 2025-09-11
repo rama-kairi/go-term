@@ -1,0 +1,59 @@
+# Binaries
+github.com/rama-kairi/go-term
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Database and data directories
+.github.com/rama-kairi/go-term/
+*.db
+*.db-shm
+*.db-wal
+
+# Test files
+test_*.py
+*.py
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+dist/
+build/
+bin/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Coverage files
+coverage.txt
+coverage.html
+
+# Documentation build
+docs/_build/

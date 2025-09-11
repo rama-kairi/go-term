@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"terminal-mcp/internal/config"
-	"terminal-mcp/internal/history"
-	"terminal-mcp/internal/logger"
-	"terminal-mcp/internal/terminal"
-	"terminal-mcp/internal/utils"
+	"github.com/rama-kairi/go-term/internal/config"
+	"github.com/rama-kairi/go-term/internal/database"
+	"github.com/rama-kairi/go-term/internal/logger"
+	"github.com/rama-kairi/go-term/internal/terminal"
+	"github.com/rama-kairi/go-term/internal/utils"
 )
 
 // TerminalTools contains all MCP tools for terminal management with enhanced features
@@ -21,16 +21,18 @@ type TerminalTools struct {
 	manager    *terminal.Manager
 	config     *config.Config
 	logger     *logger.Logger
+	database   *database.DB
 	security   *SecurityValidator
 	projectGen *utils.ProjectIDGenerator
 }
 
 // NewTerminalTools creates a new instance of terminal tools with enhanced features
-func NewTerminalTools(manager *terminal.Manager, cfg *config.Config, logger *logger.Logger) *TerminalTools {
+func NewTerminalTools(manager *terminal.Manager, cfg *config.Config, logger *logger.Logger, db *database.DB) *TerminalTools {
 	return &TerminalTools{
 		manager:    manager,
 		config:     cfg,
 		logger:     logger,
+		database:   db,
 		security:   NewSecurityValidator(cfg),
 		projectGen: utils.NewProjectIDGenerator(),
 	}
@@ -45,13 +47,13 @@ type CreateSessionArgs struct {
 
 // CreateSessionResult represents the result of creating a terminal session with project info
 type CreateSessionResult struct {
-	SessionID     string                        `json:"session_id"`
-	Name          string                        `json:"name"`
-	ProjectID     string                        `json:"project_id"`
-	WorkingDir    string                        `json:"working_dir"`
-	Message       string                        `json:"message"`
-	ProjectInfo   utils.ProjectIDInfo           `json:"project_info"`
-	Instructions  utils.ProjectIDInstructions   `json:"instructions"`
+	SessionID    string                      `json:"session_id"`
+	Name         string                      `json:"name"`
+	ProjectID    string                      `json:"project_id"`
+	WorkingDir   string                      `json:"working_dir"`
+	Message      string                      `json:"message"`
+	ProjectInfo  utils.ProjectIDInfo         `json:"project_info"`
+	Instructions utils.ProjectIDInstructions `json:"instructions"`
 }
 
 // CreateSession creates a new terminal session with project association and comprehensive documentation
@@ -101,8 +103,8 @@ func (t *TerminalTools) CreateSession(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	t.logger.Info("Session created successfully", map[string]interface{}{
-		"session_id": session.ID,
-		"project_id": session.ProjectID,
+		"session_id":  session.ID,
+		"project_id":  session.ProjectID,
 		"working_dir": session.WorkingDir,
 	})
 
@@ -133,17 +135,17 @@ type SessionInfo struct {
 
 // ListSessionsResult represents the enhanced result of listing terminal sessions
 type ListSessionsResult struct {
-	Sessions     []SessionInfo                `json:"sessions"`
-	Count        int                          `json:"count"`
-	Statistics   terminal.SessionStats        `json:"statistics"`
-	ProjectStats map[string]ProjectSummary    `json:"project_stats"`
+	Sessions     []SessionInfo             `json:"sessions"`
+	Count        int                       `json:"count"`
+	Statistics   terminal.SessionStats     `json:"statistics"`
+	ProjectStats map[string]ProjectSummary `json:"project_stats"`
 }
 
 // ProjectSummary provides a summary of sessions per project
 type ProjectSummary struct {
-	ProjectID    string `json:"project_id"`
-	SessionCount int    `json:"session_count"`
-	TotalCommands int   `json:"total_commands"`
+	ProjectID     string `json:"project_id"`
+	SessionCount  int    `json:"session_count"`
+	TotalCommands int    `json:"total_commands"`
 }
 
 // ListSessions lists all terminal sessions with enhanced information and statistics
@@ -217,17 +219,19 @@ type RunCommandArgs struct {
 
 // RunCommandResult represents the enhanced result of running a command with detailed information
 type RunCommandResult struct {
-	SessionID     string        `json:"session_id"`
-	ProjectID     string        `json:"project_id"`
-	Command       string        `json:"command"`
-	Output        string        `json:"output"`
-	ErrorOutput   string        `json:"error_output,omitempty"`
-	Success       bool          `json:"success"`
-	ExitCode      int           `json:"exit_code"`
-	Duration      string        `json:"duration"`
-	WorkingDir    string        `json:"working_dir"`
-	CommandCount  int           `json:"command_count"`  // Total commands in this session
-	HistoryID     string        `json:"history_id"`     // ID for this command in history
+	SessionID     string `json:"session_id"`             // Session identifier
+	ProjectID     string `json:"project_id"`             // Project identifier
+	Command       string `json:"command"`                // The executed command
+	Output        string `json:"output"`                 // Standard output
+	ErrorOutput   string `json:"error_output,omitempty"` // Error output if any
+	Success       bool   `json:"success"`                // Whether command succeeded
+	ExitCode      int    `json:"exit_code"`              // Exit code from command
+	Duration      string `json:"duration"`               // Time taken to execute
+	WorkingDir    string `json:"working_dir"`            // Working directory during execution
+	CommandCount  int    `json:"command_count"`          // Total commands run in session
+	HistoryID     string `json:"history_id"`             // ID for this command in history
+	StreamingUsed bool   `json:"streaming_used"`         // Whether real-time streaming was used
+	TotalChunks   int    `json:"total_chunks,omitempty"` // Number of stream chunks if streaming was used
 }
 
 // RunCommand executes a command in the specified terminal session with comprehensive tracking
@@ -252,21 +256,59 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 		return createErrorResult(fmt.Sprintf("Session not found: %v", err)), RunCommandResult{}, nil
 	}
 
-	// Execute the command
+	// Execute the command with streaming support if enabled
 	startTime := time.Now()
-	output, err := t.manager.ExecuteCommand(args.SessionID, args.Command)
-	duration := time.Since(startTime)
+	var output, errorOutput string
+	var success bool
+	var exitCode int
+	var totalChunks int
+	streamingUsed := false
 
-	success := err == nil
-	exitCode := 0
-	errorOutput := ""
+	// Check if streaming is enabled and use it for better real-time experience
+	if t.config.Streaming.Enable {
+		streamingUsed = true
 
-	if err != nil {
-		errorOutput = err.Error()
-		// Try to extract exit code from error
-		// This is a simplified approach - in a real implementation, you'd want more sophisticated error parsing
-		exitCode = 1
+		// Use the manager's streaming command execution to maintain session state
+		streamOutput, streamErr := t.manager.ExecuteCommandWithStreaming(args.SessionID, args.Command)
+
+		success = streamErr == nil
+		exitCode = 0
+		output = streamOutput
+		totalChunks = 1 // Basic implementation, will be enhanced when full streaming is integrated
+
+		if streamErr != nil {
+			errorOutput = streamErr.Error()
+			exitCode = 1
+			success = false
+		}
+
+		t.logger.Info("Command executed with streaming", map[string]interface{}{
+			"session_id": args.SessionID,
+			"command":    args.Command,
+			"success":    success,
+			"streaming":  true,
+			"duration":   time.Since(startTime).String(),
+		})
+	} else {
+		// Fall back to traditional execution
+		output, err = t.manager.ExecuteCommand(args.SessionID, args.Command)
+		success = err == nil
+		exitCode = 0
+
+		if err != nil {
+			errorOutput = err.Error()
+			exitCode = 1
+		}
+
+		t.logger.Info("Command executed traditionally", map[string]interface{}{
+			"session_id": args.SessionID,
+			"command":    args.Command,
+			"success":    success,
+			"duration":   time.Since(startTime).String(),
+		})
 	}
+
+	duration := time.Since(startTime)
 
 	// Get updated session info
 	updatedSession, _ := t.manager.GetSession(args.SessionID)
@@ -276,17 +318,19 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 	}
 
 	result := RunCommandResult{
-		SessionID:    args.SessionID,
-		ProjectID:    session.ProjectID,
-		Command:      args.Command,
-		Output:       output,
-		ErrorOutput:  errorOutput,
-		Success:      success,
-		ExitCode:     exitCode,
-		Duration:     duration.String(),
-		WorkingDir:   session.WorkingDir,
-		CommandCount: commandCount,
-		HistoryID:    fmt.Sprintf("%s_%d", args.SessionID[:8], commandCount),
+		SessionID:     args.SessionID,
+		ProjectID:     session.ProjectID,
+		Command:       args.Command,
+		Output:        output,
+		ErrorOutput:   errorOutput,
+		Success:       success,
+		ExitCode:      exitCode,
+		Duration:      duration.String(),
+		WorkingDir:    session.WorkingDir,
+		CommandCount:  commandCount,
+		HistoryID:     fmt.Sprintf("%s_%d", args.SessionID[:8], commandCount),
+		StreamingUsed: streamingUsed,
+		TotalChunks:   totalChunks,
 	}
 
 	// Create response
@@ -312,38 +356,38 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 
 // SearchHistoryArgs represents arguments for searching command history
 type SearchHistoryArgs struct {
-	SessionID     string    `json:"session_id,omitempty" jsonschema:"description,Filter by specific session ID. Leave empty to search all sessions."`
-	ProjectID     string    `json:"project_id,omitempty" jsonschema:"description,Filter by specific project ID. Leave empty to search all projects."`
-	Command       string    `json:"command,omitempty" jsonschema:"description,Search for commands containing this text (case-insensitive partial match)."`
-	Output        string    `json:"output,omitempty" jsonschema:"description,Search for commands with output containing this text (case-insensitive partial match)."`
-	Success       *bool     `json:"success,omitempty" jsonschema:"description,Filter by success status: true for successful commands false for failed commands omit for all."`
-	StartTime     string    `json:"start_time,omitempty" jsonschema:"description,Find commands executed after this time (ISO 8601 format: 2006-01-02T15:04:05Z)."`
-	EndTime       string    `json:"end_time,omitempty" jsonschema:"description,Find commands executed before this time (ISO 8601 format: 2006-01-02T15:04:05Z)."`
-	WorkingDir    string    `json:"working_dir,omitempty" jsonschema:"description,Filter by working directory path (partial match)."`
-	Tags          []string  `json:"tags,omitempty" jsonschema:"description,Filter by tags (commands must have all specified tags)."`
-	Limit         int       `json:"limit,omitempty" jsonschema:"description,Maximum number of results to return (default: 100 max: 1000)."`
-	SortBy        string    `json:"sort_by,omitempty" jsonschema:"description,Sort results by: 'time' (default) 'duration' or 'command'."`
-	SortDesc      bool      `json:"sort_desc,omitempty" jsonschema:"description,Sort in descending order (default: true for time-based sorting)."`
-	IncludeOutput bool      `json:"include_output,omitempty" jsonschema:"description,Include command output in results (default: false to reduce response size)."`
+	SessionID     string   `json:"session_id,omitempty" jsonschema:"description,Filter by specific session ID. Leave empty to search all sessions."`
+	ProjectID     string   `json:"project_id,omitempty" jsonschema:"description,Filter by specific project ID. Leave empty to search all projects."`
+	Command       string   `json:"command,omitempty" jsonschema:"description,Search for commands containing this text (case-insensitive partial match)."`
+	Output        string   `json:"output,omitempty" jsonschema:"description,Search for commands with output containing this text (case-insensitive partial match)."`
+	Success       *bool    `json:"success,omitempty" jsonschema:"description,Filter by success status: true for successful commands false for failed commands omit for all."`
+	StartTime     string   `json:"start_time,omitempty" jsonschema:"description,Find commands executed after this time (ISO 8601 format: 2006-01-02T15:04:05Z)."`
+	EndTime       string   `json:"end_time,omitempty" jsonschema:"description,Find commands executed before this time (ISO 8601 format: 2006-01-02T15:04:05Z)."`
+	WorkingDir    string   `json:"working_dir,omitempty" jsonschema:"description,Filter by working directory path (partial match)."`
+	Tags          []string `json:"tags,omitempty" jsonschema:"description,Filter by tags (commands must have all specified tags)."`
+	Limit         int      `json:"limit,omitempty" jsonschema:"description,Maximum number of results to return (default: 100 max: 1000)."`
+	SortBy        string   `json:"sort_by,omitempty" jsonschema:"description,Sort results by: 'time' (default) 'duration' or 'command'."`
+	SortDesc      bool     `json:"sort_desc,omitempty" jsonschema:"description,Sort in descending order (default: true for time-based sorting)."`
+	IncludeOutput bool     `json:"include_output,omitempty" jsonschema:"description,Include command output in results (default: false to reduce response size)."`
 }
 
 // SearchHistoryResult represents the result of searching command history
 type SearchHistoryResult struct {
-	TotalFound    int                     `json:"total_found"`
-	Results       []history.CommandEntry  `json:"results"`
-	Query         SearchHistoryArgs       `json:"query"`
-	SearchTime    string                  `json:"search_time"`
-	ProjectStats  map[string]int          `json:"project_stats"`  // project_id -> command_count in results
-	SessionStats  map[string]int          `json:"session_stats"`  // session_id -> command_count in results
-	Instructions  SearchInstructions      `json:"instructions"`
+	TotalFound   int                       `json:"total_found"`
+	Results      []*database.CommandRecord `json:"results"`
+	Query        SearchHistoryArgs         `json:"query"`
+	SearchTime   string                    `json:"search_time"`
+	ProjectStats map[string]int            `json:"project_stats"` // project_id -> command_count in results
+	SessionStats map[string]int            `json:"session_stats"` // session_id -> command_count in results
+	Instructions SearchInstructions        `json:"instructions"`
 }
 
 // SearchInstructions provides guidance on how to use the search functionality
 type SearchInstructions struct {
-	Description string              `json:"description"`
-	Examples    []SearchExample     `json:"examples"`
-	Tips        []string            `json:"tips"`
-	Limits      SearchLimits        `json:"limits"`
+	Description string          `json:"description"`
+	Examples    []SearchExample `json:"examples"`
+	Tips        []string        `json:"tips"`
+	Limits      SearchLimits    `json:"limits"`
 }
 
 // SearchExample shows example search queries
@@ -361,25 +405,13 @@ type SearchLimits struct {
 
 // SearchHistory searches through command history across all sessions and projects
 func (t *TerminalTools) SearchHistory(ctx context.Context, req *mcp.CallToolRequest, args SearchHistoryArgs) (*mcp.CallToolResult, SearchHistoryResult, error) {
-	// Convert arguments to internal search options
-	options := history.SearchOptions{
-		SessionID:     args.SessionID,
-		ProjectID:     args.ProjectID,
-		Command:       args.Command,
-		Output:        args.Output,
-		Success:       args.Success,
-		WorkingDir:    args.WorkingDir,
-		Tags:          args.Tags,
-		Limit:         args.Limit,
-		SortBy:        args.SortBy,
-		SortDesc:      args.SortDesc,
-		IncludeOutput: args.IncludeOutput,
-	}
+	startTime := time.Now()
 
 	// Parse time filters if provided
+	var startTimeFilter, endTimeFilter time.Time
 	if args.StartTime != "" {
 		if t, err := time.Parse(time.RFC3339, args.StartTime); err == nil {
-			options.StartTime = t
+			startTimeFilter = t
 		} else {
 			return createErrorResult(fmt.Sprintf("Invalid start_time format. Use ISO 8601 format: %s", time.RFC3339)), SearchHistoryResult{}, nil
 		}
@@ -387,28 +419,32 @@ func (t *TerminalTools) SearchHistory(ctx context.Context, req *mcp.CallToolRequ
 
 	if args.EndTime != "" {
 		if t, err := time.Parse(time.RFC3339, args.EndTime); err == nil {
-			options.EndTime = t
+			endTimeFilter = t
 		} else {
 			return createErrorResult(fmt.Sprintf("Invalid end_time format. Use ISO 8601 format: %s", time.RFC3339)), SearchHistoryResult{}, nil
 		}
 	}
 
 	// Apply default limits
-	if options.Limit <= 0 {
-		options.Limit = 100
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 100
 	}
-	if options.Limit > 1000 {
-		options.Limit = 1000
-	}
-
-	// Set default sorting
-	if options.SortBy == "" {
-		options.SortBy = "time"
-		options.SortDesc = true
+	if limit > 1000 {
+		limit = 1000
 	}
 
-	// Execute search
-	searchResult, err := t.manager.GetHistoryManager().SearchHistory(options)
+	// Execute database search
+	commands, err := t.database.SearchCommands(
+		args.SessionID,
+		args.ProjectID,
+		args.Command,
+		args.Output,
+		args.Success,
+		startTimeFilter,
+		endTimeFilter,
+		limit,
+	)
 	if err != nil {
 		t.logger.Error("Failed to search command history", err, map[string]interface{}{
 			"query": args,
@@ -416,86 +452,83 @@ func (t *TerminalTools) SearchHistory(ctx context.Context, req *mcp.CallToolRequ
 		return createErrorResult(fmt.Sprintf("Search failed: %v", err)), SearchHistoryResult{}, nil
 	}
 
-	// Calculate statistics
+	// Calculate stats
 	projectStats := make(map[string]int)
 	sessionStats := make(map[string]int)
-
-	for _, cmd := range searchResult.Results {
+	for _, cmd := range commands {
 		projectStats[cmd.ProjectID]++
 		sessionStats[cmd.SessionID]++
 	}
 
-	// Create comprehensive result with instructions
 	result := SearchHistoryResult{
-		TotalFound:   searchResult.TotalFound,
-		Results:      searchResult.Results,
+		TotalFound:   len(commands),
+		Results:      commands,
 		Query:        args,
-		SearchTime:   searchResult.SearchTime.String(),
+		SearchTime:   time.Since(startTime).String(),
 		ProjectStats: projectStats,
 		SessionStats: sessionStats,
-		Instructions: SearchInstructions{
-			Description: "Search through command history across all terminal sessions and projects. Use filters to narrow down results and find specific commands or outputs.",
-			Examples: []SearchExample{
-				{
-					Description: "Find all failed commands in the last day",
-					Query: SearchHistoryArgs{
-						Success:   boolPtr(false),
-						StartTime: time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
-						Limit:     50,
-					},
-				},
-				{
-					Description: "Search for Docker commands in a specific project",
-					Query: SearchHistoryArgs{
-						Command:   "docker",
-						ProjectID: "my_project_a7b3c9",
-						Limit:     20,
-					},
-				},
-				{
-					Description: "Find commands that produced error output containing 'permission denied'",
-					Query: SearchHistoryArgs{
-						Output:        "permission denied",
-						IncludeOutput: true,
-						Success:       boolPtr(false),
-					},
-				},
-			},
-			Tips: []string{
-				"Use partial text matching for both commands and output",
-				"Combine multiple filters to narrow down results",
-				"Use time filters to focus on recent activity",
-				"Set include_output=true when searching by output content",
-				"Use project_id to focus on specific projects",
-				"Sort by duration to find long-running commands",
-			},
-			Limits: SearchLimits{
-				MaxResults:     1000,
-				DefaultResults: 100,
-				TimeFormat:     time.RFC3339,
-			},
-		},
+		Instructions: getSearchInstructions(),
 	}
 
-	// Create response
-	resultJSON, _ := json.MarshalIndent(result, "", "  ")
-	content := []mcp.Content{
-		&mcp.TextContent{
-			Text: string(resultJSON),
-		},
-	}
-
-	t.logger.Info("Command history searched", map[string]interface{}{
-		"total_found":    searchResult.TotalFound,
-		"search_time":    searchResult.SearchTime.String(),
-		"projects_found": len(projectStats),
-		"sessions_found": len(sessionStats),
+	t.logger.Info("Command history search completed", map[string]interface{}{
+		"results_count": len(commands),
+		"search_time":   time.Since(startTime).String(),
+		"session_id":    args.SessionID,
+		"project_id":    args.ProjectID,
 	})
 
-	return &mcp.CallToolResult{
-		Content: content,
-		IsError: false,
-	}, result, nil
+	return createJSONResult(result), result, nil
+}
+
+// getSearchInstructions returns comprehensive search instructions and examples
+func getSearchInstructions() SearchInstructions {
+	return SearchInstructions{
+		Description: "Search through command history across all terminal sessions and projects. Use filters to narrow down results and find specific commands or outputs.",
+		Examples: []SearchExample{
+			{
+				Description: "Find all failed commands in the last day",
+				Query: SearchHistoryArgs{
+					Success:   boolPtr(false),
+					StartTime: time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
+					Limit:     50,
+				},
+			},
+			{
+				Description: "Search for Docker commands in a specific project",
+				Query: SearchHistoryArgs{
+					Command:   "docker",
+					ProjectID: "my_project_a7b3c9",
+					Limit:     20,
+				},
+			},
+			{
+				Description: "Find commands that produced error output containing 'permission denied'",
+				Query: SearchHistoryArgs{
+					Output:        "permission denied",
+					IncludeOutput: true,
+					Success:       boolPtr(false),
+				},
+			},
+		},
+		Tips: []string{
+			"Use partial text matching for both commands and output",
+			"Combine multiple filters to narrow down results",
+			"Use time filters to focus on recent activity",
+			"Set include_output=true when searching by output content",
+			"Use project_id to focus on specific projects",
+			"Sort by duration to find long-running commands",
+		},
+		Limits: SearchLimits{
+			MaxResults:     1000,
+			DefaultResults: 100,
+			TimeFormat:     time.RFC3339,
+		},
+	}
+}
+
+// boolPtr returns a pointer to a boolean value
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 // SecurityValidator provides command security validation
@@ -518,11 +551,31 @@ func (s *SecurityValidator) ValidateCommand(command string) error {
 		return fmt.Errorf("command cannot exceed %d characters", s.config.Session.MaxCommandLength)
 	}
 
-	// Check for blocked commands
+	// Check for blocked commands using word boundaries to avoid false positives
 	lowerCommand := strings.ToLower(strings.TrimSpace(command))
+
+	// Split command into words for more precise validation
+	commandWords := strings.Fields(lowerCommand)
+
 	for _, blocked := range s.config.Security.BlockedCommands {
-		if strings.Contains(lowerCommand, strings.ToLower(blocked)) {
-			return fmt.Errorf("command contains blocked operation: %s", blocked)
+		blockedLower := strings.ToLower(blocked)
+
+		// Check if any word in the command matches the blocked command exactly
+		for _, word := range commandWords {
+			// Remove common shell operators to get the actual command
+			cleanWord := strings.Trim(word, ";&|(){}[]<>\"'`")
+
+			if cleanWord == blockedLower {
+				return fmt.Errorf("command contains blocked operation: %s", blocked)
+			}
+		}
+
+		// Also check for blocked patterns that might contain spaces or special operators
+		// using regex word boundaries for patterns like "rm -rf /"
+		if strings.Contains(blockedLower, " ") || strings.ContainsAny(blockedLower, "-/") {
+			if strings.Contains(lowerCommand, blockedLower) {
+				return fmt.Errorf("command contains blocked operation: %s", blocked)
+			}
 		}
 	}
 
@@ -572,11 +625,6 @@ func (s *SecurityValidator) ValidateCommand(command string) error {
 
 // Helper functions
 
-// boolPtr returns a pointer to a boolean value
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 // validateSessionName validates a session name
 func validateSessionName(name string) error {
 	if name == "" {
@@ -611,6 +659,21 @@ func validateSessionID(sessionID string) error {
 	return nil
 }
 
+// createJSONResult creates a JSON result for tool responses
+func createJSONResult(data interface{}) *mcp.CallToolResult {
+	resultJSON, _ := json.MarshalIndent(data, "", "  ")
+	content := []mcp.Content{
+		&mcp.TextContent{
+			Text: string(resultJSON),
+		},
+	}
+
+	return &mcp.CallToolResult{
+		Content: content,
+		IsError: false,
+	}
+}
+
 // createErrorResult creates an error result for tool responses
 func createErrorResult(errorMessage string) *mcp.CallToolResult {
 	content := []mcp.Content{
@@ -623,4 +686,118 @@ func createErrorResult(errorMessage string) *mcp.CallToolResult {
 		Content: content,
 		IsError: true,
 	}
+}
+
+// DeleteSessionArgs represents arguments for deleting sessions
+type DeleteSessionArgs struct {
+	SessionID string `json:"session_id,omitempty" jsonschema:"description,The UUID4 identifier of the session to delete. Leave empty to delete by project."`
+	ProjectID string `json:"project_id,omitempty" jsonschema:"description,Delete all sessions for this project ID. Leave empty to delete by session ID."`
+	Confirm   bool   `json:"confirm" jsonschema:"required,description,Confirmation flag to prevent accidental deletion. Must be set to true."`
+}
+
+// DeleteSessionResult represents the result of session deletion
+type DeleteSessionResult struct {
+	Success         bool   `json:"success"`
+	SessionsDeleted int    `json:"sessions_deleted"`
+	Message         string `json:"message"`
+	ProjectID       string `json:"project_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+}
+
+// DeleteSession deletes terminal sessions (individual or project-wide) with confirmation
+func (t *TerminalTools) DeleteSession(ctx context.Context, req *mcp.CallToolRequest, args DeleteSessionArgs) (*mcp.CallToolResult, DeleteSessionResult, error) {
+	// Require confirmation
+	if !args.Confirm {
+		return createErrorResult("Deletion requires confirmation. Set 'confirm' to true."), DeleteSessionResult{}, nil
+	}
+
+	// Validate arguments - must specify either session_id or project_id, but not both
+	if args.SessionID == "" && args.ProjectID == "" {
+		return createErrorResult("Must specify either session_id or project_id"), DeleteSessionResult{}, nil
+	}
+
+	if args.SessionID != "" && args.ProjectID != "" {
+		return createErrorResult("Cannot specify both session_id and project_id. Choose one."), DeleteSessionResult{}, nil
+	}
+
+	var deletedCount int
+	var message string
+	var err error
+
+	if args.SessionID != "" {
+		// Delete specific session
+		if err := validateSessionID(args.SessionID); err != nil {
+			return createErrorResult(fmt.Sprintf("Invalid session ID: %v", err)), DeleteSessionResult{}, nil
+		}
+
+		// Check if session exists before attempting to delete
+		if !t.manager.SessionExists(args.SessionID) {
+			return createErrorResult(fmt.Sprintf("Session not found: %s", args.SessionID)), DeleteSessionResult{}, nil
+		}
+
+		err = t.manager.DeleteSession(args.SessionID)
+		if err != nil {
+			t.logger.Error("Failed to delete session", err, map[string]interface{}{
+				"session_id": args.SessionID,
+			})
+			return createErrorResult(fmt.Sprintf("Failed to delete session: %v", err)), DeleteSessionResult{}, nil
+		}
+
+		deletedCount = 1
+		message = fmt.Sprintf("Successfully deleted session %s", args.SessionID)
+
+		t.logger.LogSessionEvent("session_deleted", args.SessionID, "", map[string]interface{}{
+			"deleted_by": "mcp_tool",
+		})
+
+	} else {
+		// Delete all sessions for project
+		if err := t.projectGen.ValidateProjectID(args.ProjectID); err != nil {
+			return createErrorResult(fmt.Sprintf("Invalid project ID: %v", err)), DeleteSessionResult{}, nil
+		}
+
+		deletedSessions, err := t.manager.DeleteProjectSessions(args.ProjectID)
+		if err != nil {
+			t.logger.Error("Failed to delete project sessions", err, map[string]interface{}{
+				"project_id": args.ProjectID,
+			})
+			return createErrorResult(fmt.Sprintf("Failed to delete project sessions: %v", err)), DeleteSessionResult{}, nil
+		}
+
+		deletedCount = len(deletedSessions)
+		if deletedCount == 0 {
+			message = fmt.Sprintf("No sessions found for project %s", args.ProjectID)
+		} else {
+			message = fmt.Sprintf("Successfully deleted %d sessions for project %s", deletedCount, args.ProjectID)
+		}
+
+		t.logger.LogSessionEvent("project_sessions_deleted", "", args.ProjectID, map[string]interface{}{
+			"deleted_count": deletedCount,
+			"deleted_by":    "mcp_tool",
+		})
+	}
+
+	result := DeleteSessionResult{
+		Success:         true,
+		SessionsDeleted: deletedCount,
+		Message:         message,
+		ProjectID:       args.ProjectID,
+		SessionID:       args.SessionID,
+	}
+
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return createErrorResult("Failed to marshal result"), DeleteSessionResult{}, nil
+	}
+
+	content := []mcp.Content{
+		&mcp.TextContent{
+			Text: string(resultJSON),
+		},
+	}
+
+	return &mcp.CallToolResult{
+		Content: content,
+		IsError: false,
+	}, result, nil
 }

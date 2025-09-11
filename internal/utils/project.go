@@ -114,18 +114,18 @@ func (p *ProjectIDGenerator) GetProjectIDInstructions() ProjectIDInstructions {
 		Description: "Project IDs are automatically generated based on your current working directory with a random suffix for uniqueness",
 		Examples: []ProjectIDExample{
 			{
-				FolderName: "my-awesome-project",
-				ProjectID:  "my_awesome_project_a7b3c9",
+				FolderName:  "my-awesome-project",
+				ProjectID:   "my_awesome_project_a7b3c9",
 				Explanation: "Hyphens converted to underscores, random 6-character suffix added",
 			},
 			{
-				FolderName: "NextJS App",
-				ProjectID:  "nextjs_app_x4m8n2",
+				FolderName:  "NextJS App",
+				ProjectID:   "nextjs_app_x4m8n2",
 				Explanation: "Spaces converted to underscores, case normalized, random suffix added",
 			},
 			{
-				FolderName: "Terminal-MCP",
-				ProjectID:  "terminal_mcp_k9p5q1",
+				FolderName:  "github.com/rama-kairi/go-term",
+				ProjectID:   "terminal_mcp_k9p5q1",
 				Explanation: "Hyphens converted to underscores, case normalized, random suffix added",
 			},
 		},
@@ -139,9 +139,9 @@ func (p *ProjectIDGenerator) GetProjectIDInstructions() ProjectIDInstructions {
 			"Length must be between 3 and 100 characters",
 		},
 		Usage: ProjectIDUsage{
-			AutoGeneration: "Project IDs are automatically generated when you create a new terminal session. The system uses your current working directory to create a meaningful project ID.",
+			AutoGeneration:      "Project IDs are automatically generated when you create a new terminal session. The system uses your current working directory to create a meaningful project ID.",
 			ManualSpecification: "You can specify a custom project ID when creating a session, but it must follow the format rules.",
-			Consistency: "Use the same project ID across related sessions to group them together. The search tool can filter by project ID to find related commands.",
+			Consistency:         "Use the same project ID across related sessions to group them together. The search tool can filter by project ID to find related commands.",
 			BestPractices: []string{
 				"Let the system auto-generate project IDs for consistency",
 				"Use descriptive folder names for better project IDs",
@@ -219,11 +219,11 @@ type ProjectIDInfo struct {
 
 // ProjectIDInstructions provides comprehensive instructions for project ID usage
 type ProjectIDInstructions struct {
-	Format      string               `json:"format"`
-	Description string               `json:"description"`
-	Examples    []ProjectIDExample   `json:"examples"`
-	Rules       []string             `json:"rules"`
-	Usage       ProjectIDUsage       `json:"usage"`
+	Format      string             `json:"format"`
+	Description string             `json:"description"`
+	Examples    []ProjectIDExample `json:"examples"`
+	Rules       []string           `json:"rules"`
+	Usage       ProjectIDUsage     `json:"usage"`
 }
 
 // ProjectIDExample shows an example of project ID generation

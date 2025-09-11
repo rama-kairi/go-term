@@ -1,0 +1,314 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Go Terminal MCP Server Configuration",
+  "description": "Configuration schema for the Go Terminal MCP Server",
+  "type": "object",
+  "properties": {
+    "server": {
+      "type": "object",
+      "description": "Server configuration",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Server name identifier",
+          "default": "github.com/rama-kairi/go-term"
+        },
+        "version": {
+          "type": "string",
+          "description": "Server version",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "default": "2.0.0"
+        },
+        "debug": {
+          "type": "boolean",
+          "description": "Enable debug mode",
+          "default": false
+        }
+      },
+      "required": ["name", "version", "debug"],
+      "additionalProperties": false
+    },
+    "session": {
+      "type": "object",
+      "description": "Session management configuration",
+      "properties": {
+        "max_sessions": {
+          "type": "integer",
+          "description": "Maximum number of concurrent sessions",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "default_timeout": {
+          "type": "string",
+          "description": "Default session timeout (Go duration format)",
+          "pattern": "^\\d+[smhd]$",
+          "default": "1h"
+        },
+        "cleanup_interval": {
+          "type": "string",
+          "description": "Session cleanup interval (Go duration format)",
+          "pattern": "^\\d+[smhd]$",
+          "default": "5m"
+        },
+        "max_command_length": {
+          "type": "integer",
+          "description": "Maximum command length in characters",
+          "minimum": 100,
+          "maximum": 100000,
+          "default": 50000
+        },
+        "max_output_size": {
+          "type": "integer",
+          "description": "Maximum output size in bytes",
+          "minimum": 1024,
+          "maximum": 104857600,
+          "default": 10485760
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Default working directory (empty for current)",
+          "default": ""
+        },
+        "shell": {
+          "type": "string",
+          "description": "Default shell (empty for system default)",
+          "default": ""
+        },
+        "enable_streaming": {
+          "type": "boolean",
+          "description": "Enable real-time command output streaming",
+          "default": true
+        }
+      },
+      "required": ["max_sessions", "default_timeout", "cleanup_interval", "max_command_length", "max_output_size", "enable_streaming"],
+      "additionalProperties": false
+    },
+    "database": {
+      "type": "object",
+      "description": "Database configuration",
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Enable database for session persistence",
+          "default": true
+        },
+        "driver": {
+          "type": "string",
+          "description": "Database driver",
+          "enum": ["sqlite3"],
+          "default": "sqlite3"
+        },
+        "path": {
+          "type": "string",
+          "description": "Database file path (auto-set to config directory)",
+          "default": ""
+        },
+        "data_dir": {
+          "type": "string",
+          "description": "Data directory path (auto-set to ~/.config/go-term)",
+          "default": ""
+        },
+        "max_connections": {
+          "type": "integer",
+          "description": "Maximum database connections",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 10
+        },
+        "connection_timeout": {
+          "type": "string",
+          "description": "Database connection timeout",
+          "pattern": "^\\d+[smhd]$",
+          "default": "5s"
+        },
+        "enable_wal": {
+          "type": "boolean",
+          "description": "Enable SQLite WAL mode",
+          "default": true
+        },
+        "vacuum_interval": {
+          "type": "string",
+          "description": "Database vacuum interval",
+          "pattern": "^\\d+[smhd]$",
+          "default": "24h"
+        }
+      },
+      "required": ["enable", "driver", "max_connections", "connection_timeout", "enable_wal", "vacuum_interval"],
+      "additionalProperties": false
+    },
+    "streaming": {
+      "type": "object",
+      "description": "Command output streaming configuration",
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Enable command output streaming",
+          "default": true
+        },
+        "buffer_size": {
+          "type": "integer",
+          "description": "Streaming buffer size in bytes",
+          "minimum": 512,
+          "maximum": 65536,
+          "default": 4096
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Streaming timeout",
+          "pattern": "^\\d+[smhd]$",
+          "default": "30s"
+        }
+      },
+      "required": ["enable", "buffer_size", "timeout"],
+      "additionalProperties": false
+    },
+    "security": {
+      "type": "object",
+      "description": "Security configuration",
+      "properties": {
+        "enable_sandbox": {
+          "type": "boolean",
+          "description": "Enable command sandboxing",
+          "default": false
+        },
+        "allowed_commands": {
+          "type": "array",
+          "description": "List of allowed commands (empty means all allowed)",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "blocked_commands": {
+          "type": "array",
+          "description": "List of blocked commands",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "rm -rf /",
+            "format",
+            "mkfs",
+            "dd if=/dev/zero",
+            ":(){ :|:& };:"
+          ]
+        },
+        "allow_network_access": {
+          "type": "boolean",
+          "description": "Allow network access from commands",
+          "default": true
+        },
+        "allow_filesystem_write": {
+          "type": "boolean",
+          "description": "Allow filesystem write operations",
+          "default": true
+        },
+        "max_processes": {
+          "type": "integer",
+          "description": "Maximum number of processes per session",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20
+        },
+        "max_memory_mb": {
+          "type": "integer",
+          "description": "Maximum memory usage per session in MB",
+          "minimum": 64,
+          "maximum": 8192,
+          "default": 2048
+        },
+        "max_cpu_percent": {
+          "type": "integer",
+          "description": "Maximum CPU usage percentage per session",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 80
+        }
+      },
+      "required": ["enable_sandbox", "allowed_commands", "blocked_commands", "allow_network_access", "allow_filesystem_write", "max_processes", "max_memory_mb", "max_cpu_percent"],
+      "additionalProperties": false
+    },
+    "logging": {
+      "type": "object",
+      "description": "Logging configuration",
+      "properties": {
+        "level": {
+          "type": "string",
+          "description": "Log level",
+          "enum": ["debug", "info", "warn", "error"],
+          "default": "info"
+        },
+        "format": {
+          "type": "string",
+          "description": "Log format",
+          "enum": ["json", "text"],
+          "default": "json"
+        },
+        "output": {
+          "type": "string",
+          "description": "Log output destination",
+          "default": "stderr"
+        },
+        "max_size_mb": {
+          "type": "integer",
+          "description": "Maximum log file size in MB",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        },
+        "max_backups": {
+          "type": "integer",
+          "description": "Maximum number of log file backups",
+          "minimum": 0,
+          "maximum": 10,
+          "default": 3
+        },
+        "max_age_days": {
+          "type": "integer",
+          "description": "Maximum age of log files in days",
+          "minimum": 1,
+          "maximum": 365,
+          "default": 30
+        }
+      },
+      "required": ["level", "format", "output", "max_size_mb", "max_backups", "max_age_days"],
+      "additionalProperties": false
+    },
+    "monitoring": {
+      "type": "object",
+      "description": "Monitoring and metrics configuration",
+      "properties": {
+        "enable_metrics": {
+          "type": "boolean",
+          "description": "Enable metrics collection",
+          "default": false
+        },
+        "metrics_port": {
+          "type": "integer",
+          "description": "Metrics server port",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 9090
+        },
+        "health_check_port": {
+          "type": "integer",
+          "description": "Health check server port",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 8080
+        },
+        "stats_interval": {
+          "type": "string",
+          "description": "Statistics collection interval",
+          "pattern": "^\\d+[smhd]$",
+          "default": "30s"
+        }
+      },
+      "required": ["enable_metrics", "metrics_port", "health_check_port", "stats_interval"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["server", "session", "database", "streaming", "security", "logging", "monitoring"],
+  "additionalProperties": false
+}

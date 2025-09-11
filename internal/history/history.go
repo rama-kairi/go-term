@@ -50,16 +50,16 @@ type HistoryManager struct {
 type SearchOptions struct {
 	SessionID     string    `json:"session_id,omitempty"`
 	ProjectID     string    `json:"project_id,omitempty"`
-	Command       string    `json:"command,omitempty"`       // Partial command match
-	Output        string    `json:"output,omitempty"`        // Partial output match
-	Success       *bool     `json:"success,omitempty"`       // Filter by success status
-	StartTime     time.Time `json:"start_time,omitempty"`    // Commands after this time
-	EndTime       time.Time `json:"end_time,omitempty"`      // Commands before this time
-	WorkingDir    string    `json:"working_dir,omitempty"`   // Filter by working directory
-	Tags          []string  `json:"tags,omitempty"`          // Commands with all these tags
-	Limit         int       `json:"limit,omitempty"`         // Max results (default 100)
-	SortBy        string    `json:"sort_by,omitempty"`       // "time", "duration", "command" (default "time")
-	SortDesc      bool      `json:"sort_desc,omitempty"`     // Sort descending (default true)
+	Command       string    `json:"command,omitempty"`        // Partial command match
+	Output        string    `json:"output,omitempty"`         // Partial output match
+	Success       *bool     `json:"success,omitempty"`        // Filter by success status
+	StartTime     time.Time `json:"start_time,omitempty"`     // Commands after this time
+	EndTime       time.Time `json:"end_time,omitempty"`       // Commands before this time
+	WorkingDir    string    `json:"working_dir,omitempty"`    // Filter by working directory
+	Tags          []string  `json:"tags,omitempty"`           // Commands with all these tags
+	Limit         int       `json:"limit,omitempty"`          // Max results (default 100)
+	SortBy        string    `json:"sort_by,omitempty"`        // "time", "duration", "command" (default "time")
+	SortDesc      bool      `json:"sort_desc,omitempty"`      // Sort descending (default true)
 	IncludeOutput bool      `json:"include_output,omitempty"` // Include command output in results
 }
 
@@ -74,11 +74,11 @@ type SearchResult struct {
 // NewHistoryManager creates a new history manager
 func NewHistoryManager(dataDir string) *HistoryManager {
 	if dataDir == "" {
-		dataDir = ".terminal-mcp"
+		dataDir = ".github.com/rama-kairi/go-term"
 	}
 
 	projectsDir := filepath.Join(dataDir, "history")
-	os.MkdirAll(projectsDir, 0755)
+	os.MkdirAll(projectsDir, 0o755)
 
 	hm := &HistoryManager{
 		sessions:    make(map[string]*SessionHistory),
@@ -393,7 +393,7 @@ func (hm *HistoryManager) saveSessionHistory(session *SessionHistory) error {
 
 	// Create project directory if it doesn't exist
 	projectDir := filepath.Join(hm.projectsDir, session.ProjectID)
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create project directory: %w", err)
 	}
 
@@ -404,7 +404,7 @@ func (hm *HistoryManager) saveSessionHistory(session *SessionHistory) error {
 		return fmt.Errorf("failed to marshal session history: %w", err)
 	}
 
-	if err := os.WriteFile(filename, data, 0644); err != nil {
+	if err := os.WriteFile(filename, data, 0o644); err != nil {
 		return fmt.Errorf("failed to write session history file: %w", err)
 	}
 

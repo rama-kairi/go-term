@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"terminal-mcp/internal/config"
+	"github.com/rama-kairi/go-term/internal/config"
 )
 
 // LogLevel represents the severity level of a log entry
@@ -77,7 +77,7 @@ func NewLogger(cfg *config.LoggingConfig, component string) (*Logger, error) {
 		output = os.Stdout
 	case "file":
 		// Default log file
-		file, err := os.OpenFile("terminal-mcp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		file, err := os.OpenFile("github.com/rama-kairi/go-term.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open log file: %w", err)
 		}
@@ -85,7 +85,7 @@ func NewLogger(cfg *config.LoggingConfig, component string) (*Logger, error) {
 	default:
 		// Treat as file path
 		if strings.HasPrefix(cfg.Output, "/") || strings.Contains(cfg.Output, ".log") {
-			file, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			file, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 			if err != nil {
 				return nil, fmt.Errorf("failed to open log file %s: %w", cfg.Output, err)
 			}
@@ -124,10 +124,10 @@ func (l *Logger) WithFields(fields map[string]interface{}) *Logger {
 	defer l.mu.RUnlock()
 
 	newLogger := &Logger{
-		level:     l.level,
-		format:    l.format,
-		output:    l.output,
-		component: l.component,
+		level:      l.level,
+		format:     l.format,
+		output:     l.output,
+		component:  l.component,
 		baseFields: make(map[string]interface{}),
 	}
 
@@ -396,6 +396,6 @@ func GetDefaultLogger() *Logger {
 		Output: "stderr",
 	}
 
-	logger, _ := NewLogger(cfg, "terminal-mcp")
+	logger, _ := NewLogger(cfg, "github.com/rama-kairi/go-term")
 	return logger
 }

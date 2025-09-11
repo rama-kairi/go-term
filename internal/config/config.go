@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,12 @@ type Config struct {
 
 	// Session configuration
 	Session SessionConfig `json:"session"`
+
+	// Database configuration
+	Database DatabaseConfig `json:"database"`
+
+	// Streaming configuration
+	Streaming StreamingConfig `json:"streaming"`
 
 	// Security configuration
 	Security SecurityConfig `json:"security"`
@@ -43,6 +50,26 @@ type SessionConfig struct {
 	MaxOutputSize    int           `json:"max_output_size"`
 	WorkingDir       string        `json:"working_dir"`
 	Shell            string        `json:"shell"`
+	EnableStreaming  bool          `json:"enable_streaming"`
+}
+
+// DatabaseConfig holds database configuration
+type DatabaseConfig struct {
+	Enable            bool          `json:"enable"`
+	Driver            string        `json:"driver"`
+	Path              string        `json:"path"`
+	DataDir           string        `json:"data_dir"`
+	MaxConnections    int           `json:"max_connections"`
+	ConnectionTimeout time.Duration `json:"connection_timeout"`
+	EnableWAL         bool          `json:"enable_wal"`
+	VacuumInterval    time.Duration `json:"vacuum_interval"`
+}
+
+// StreamingConfig holds streaming configuration
+type StreamingConfig struct {
+	Enable     bool          `json:"enable"`
+	BufferSize int           `json:"buffer_size"`
+	Timeout    time.Duration `json:"timeout"`
 }
 
 // SecurityConfig holds security-related configuration
@@ -69,44 +96,61 @@ type LoggingConfig struct {
 
 // MonitoringConfig holds monitoring configuration
 type MonitoringConfig struct {
-	EnableMetrics    bool   `json:"enable_metrics"`
-	MetricsPort      int    `json:"metrics_port"`
-	HealthCheckPort  int    `json:"health_check_port"`
-	StatsInterval    time.Duration `json:"stats_interval"`
+	EnableMetrics   bool          `json:"enable_metrics"`
+	MetricsPort     int           `json:"metrics_port"`
+	HealthCheckPort int           `json:"health_check_port"`
+	StatsInterval   time.Duration `json:"stats_interval"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults
 func DefaultConfig() *Config {
+	// Get user's home directory
+	homeDir, _ := os.UserHomeDir()
+	configDir := filepath.Join(homeDir, ".config", "go-term")
+
 	return &Config{
 		Server: ServerConfig{
-			Name:    "terminal-mcp",
+			Name:    "github.com/rama-kairi/go-term",
 			Version: "2.0.0",
 			Debug:   false,
 		},
 		Session: SessionConfig{
-			MaxSessions:      10,
-			DefaultTimeout:   30 * time.Minute,
+			MaxSessions:      50,               // Increased from 10
+			DefaultTimeout:   60 * time.Minute, // Increased from 30 minutes
 			CleanupInterval:  5 * time.Minute,
-			MaxCommandLength: 10000,
-			MaxOutputSize:    1024 * 1024, // 1MB
-			WorkingDir:       "",          // Use current directory
-			Shell:            "",          // Use system default
+			MaxCommandLength: 50000,            // Increased from 10000
+			MaxOutputSize:    10 * 1024 * 1024, // 10MB, increased from 1MB
+			WorkingDir:       "",               // Use current directory
+			Shell:            "",               // Use system default
+			EnableStreaming:  true,             // Enable real-time streaming
+		},
+		Database: DatabaseConfig{
+			Enable:            true,
+			Driver:            "sqlite3",
+			Path:              filepath.Join(configDir, "sessions.db"),
+			DataDir:           configDir,
+			MaxConnections:    10,
+			ConnectionTimeout: 5 * time.Second,
+			EnableWAL:         true,
+			VacuumInterval:    24 * time.Hour,
+		},
+		Streaming: StreamingConfig{
+			Enable:     true,
+			BufferSize: 4096,
+			Timeout:    30 * time.Second,
 		},
 		Security: SecurityConfig{
-			EnableSandbox:        true,
-			AllowedCommands:      []string{}, // Empty means all allowed (subject to blocked)
-			BlockedCommands:      []string{
+			EnableSandbox:   false,      // Disabled for better usability
+			AllowedCommands: []string{}, // Empty means all allowed (subject to blocked)
+			BlockedCommands: []string{
+				// Only block truly dangerous commands
 				"rm -rf /", "format", "mkfs", "dd if=/dev/zero", ":(){ :|:& };:",
-				"sudo", "su", "passwd", "useradd", "userdel", "groupadd", "groupdel",
-				"chmod 777", "chown", "mount", "umount", "fdisk", "parted",
-				"iptables", "ufw", "firewall-cmd", "systemctl", "service",
-				"reboot", "shutdown", "halt", "poweroff", "init",
 			},
-			AllowNetworkAccess:   false,
+			AllowNetworkAccess:   true, // Allow network access
 			AllowFileSystemWrite: true,
-			MaxProcesses:         5,
-			MaxMemoryMB:          512,
-			MaxCPUPercent:        50,
+			MaxProcesses:         20,   // Increased from 5
+			MaxMemoryMB:          2048, // Increased from 512
+			MaxCPUPercent:        80,   // Increased from 50
 		},
 		Logging: LoggingConfig{
 			Level:      "info",
@@ -129,9 +173,36 @@ func DefaultConfig() *Config {
 func LoadConfig(configFile string) (*Config, error) {
 	config := DefaultConfig()
 
-	// Load from config file if provided
+	// Get user's home directory for default config
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user home directory: %w", err)
+	}
+
+	configDir := filepath.Join(homeDir, ".config", "go-term")
+	defaultConfigFile := filepath.Join(configDir, "config.json")
+
+	// Ensure config directory exists
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	// Determine which config file to use
+	configFileToUse := defaultConfigFile
 	if configFile != "" {
-		if err := loadFromFile(config, configFile); err != nil {
+		configFileToUse = configFile
+	}
+
+	// Create default config file if it doesn't exist and no custom config file was specified
+	if configFile == "" && !fileExists(defaultConfigFile) {
+		if err := config.SaveToFile(defaultConfigFile); err != nil {
+			return nil, fmt.Errorf("failed to create default config file: %w", err)
+		}
+	}
+
+	// Load from config file if it exists
+	if fileExists(configFileToUse) {
+		if err := loadFromFile(config, configFileToUse); err != nil {
 			return nil, fmt.Errorf("failed to load config file: %w", err)
 		}
 	}
@@ -139,12 +210,24 @@ func LoadConfig(configFile string) (*Config, error) {
 	// Override with environment variables
 	loadFromEnvironment(config)
 
+	// Update paths to use the proper config directory
+	if config.Database.DataDir == "" || strings.Contains(config.Database.DataDir, ".github.com") {
+		config.Database.DataDir = configDir
+		config.Database.Path = filepath.Join(configDir, "sessions.db")
+	}
+
 	// Validate configuration
 	if err := validateConfig(config); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	return config, nil
+}
+
+// fileExists checks if a file exists
+func fileExists(filename string) bool {
+	_, err := os.Stat(filename)
+	return err == nil
 }
 
 // loadFromFile loads configuration from a JSON file
@@ -189,6 +272,25 @@ func loadFromEnvironment(config *Config) {
 	}
 	if val := os.Getenv("TERMINAL_MCP_SHELL"); val != "" {
 		config.Session.Shell = val
+	}
+	if val := os.Getenv("TERMINAL_MCP_ENABLE_STREAMING"); val != "" {
+		config.Session.EnableStreaming = parseBool(val)
+	}
+
+	// Database configuration
+	if val := os.Getenv("TERMINAL_MCP_DATA_DIR"); val != "" {
+		config.Database.DataDir = val
+	}
+	if val := os.Getenv("TERMINAL_MCP_MAX_CONNECTIONS"); val != "" {
+		config.Database.MaxConnections = parseInt(val, config.Database.MaxConnections)
+	}
+	if val := os.Getenv("TERMINAL_MCP_CONNECTION_TIMEOUT"); val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			config.Database.ConnectionTimeout = duration
+		}
+	}
+	if val := os.Getenv("TERMINAL_MCP_ENABLE_WAL"); val != "" {
+		config.Database.EnableWAL = parseBool(val)
 	}
 
 	// Security configuration
@@ -307,5 +409,23 @@ func (c *Config) SaveToFile(filename string) error {
 		return err
 	}
 
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0o644)
+}
+
+// GetConfigDir returns the default configuration directory path
+func GetConfigDir() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".config", "go-term"), nil
+}
+
+// GetDefaultConfigPath returns the default configuration file path
+func GetDefaultConfigPath() (string, error) {
+	configDir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "config.json"), nil
 }

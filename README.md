@@ -16,7 +16,7 @@ A robust Model Context Protocol (MCP) server for terminal session management wit
 ### Build from Source
 
 ```bash
-go build -o terminal-mcp .
+go build -o github.com/rama-kairi/go-term .
 go install .
 ```
 
@@ -30,7 +30,7 @@ go install .
 The Terminal MCP server communicates via stdio using the Model Context Protocol:
 
 ```bash
-terminal-mcp
+github.com/rama-kairi/go-term
 ```
 
 ### MCP Tools Available
@@ -53,7 +53,7 @@ export TERMINAL_MCP_LOG_OUTPUT=stderr
 ## Project Structure
 
 ```
-terminal-mcp/
+github.com/rama-kairi/go-term/
 ├── main.go                      # MCP server entry point
 ├── internal/
 │   ├── config/                  # Configuration management
