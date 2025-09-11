@@ -30,10 +30,32 @@ A powerful, production-ready Model Context Protocol (MCP) server for advanced te
 
 ## 🚀 Quick Start
 
-### Installation
+### One-Line Installation (Recommended)
+
+Install GoTerm MCP Server with automatic dependency management:
 
 ```bash
-# Install via Go (recommended)
+# Using curl (recommended)
+curl -fsSL https://raw.githubusercontent.com/rama-kairi/go-term/main/install.sh | bash
+
+# Using wget
+wget -qO- https://raw.githubusercontent.com/rama-kairi/go-term/main/install.sh | bash
+```
+
+**What the installer does:**
+- ✅ **Detects and installs Go** (if not present) using system package managers
+- ✅ **Configures Go environment** with proper PATH and GOPATH setup
+- ✅ **Installs GoTerm MCP Server** via `go install`
+- ✅ **Updates VS Code MCP configuration** automatically
+- ✅ **Installs required tools** (jq for JSON manipulation)
+- ✅ **Cross-platform support** (macOS, Linux, Windows/WSL)
+
+### Manual Installation
+
+If you prefer manual installation or already have Go installed:
+
+```bash
+# Install via Go (requires Go 1.19+)
 go install github.com/rama-kairi/go-term@latest
 
 # Or build from source
@@ -44,18 +66,21 @@ go build -o go-term .
 
 ### MCP Client Configuration
 
-#### VS Code with MCP Extension
-Add to your `mcp.json`:
+#### VS Code with MCP Extension (Auto-configured by installer)
+
+The installation script automatically updates your VS Code MCP configuration. If you need to configure manually:
+
 ```json
 {
   "servers": {
     "go-terminal": {
-      "command": "go-term",
-      "args": []
+      "command": "/path/to/go/bin/go-term"
     }
   }
 }
 ```
+
+**Location**: `~/Library/Application Support/Code/User/mcp.json` (macOS) or `~/.config/Code/User/mcp.json` (Linux)
 
 #### Claude Desktop
 Add to `claude_desktop_config.json`:
@@ -68,6 +93,46 @@ Add to `claude_desktop_config.json`:
   }
 }
 ```
+
+#### Post-Installation Setup
+
+1. **Restart VS Code** to reload MCP configuration
+2. **Open MCP Extension** and select "go-term" server
+3. **Disable default terminal tools** to avoid conflicts
+4. **Enable Beast Mode** in GitHub Copilot for enhanced features
+5. **Start using** the powerful terminal management tools!
+
+#### Beast Mode Configuration
+
+For optimal agent performance, enable "Beast Mode" in GitHub Copilot:
+
+1. Open VS Code Command Palette (`Cmd/Ctrl + Shift + P`)
+2. Search for "GitHub Copilot: Configure Beast Mode"
+3. Add the following configuration:
+
+```json
+{
+  "terminal_management": {
+    "enabled": true,
+    "tools": [
+      "create_terminal_session",
+      "list_terminal_sessions",
+      "run_command",
+      "search_terminal_history",
+      "delete_session",
+      "check_background_process"
+    ],
+    "auto_background_detection": true,
+    "real_time_monitoring": true
+  }
+}
+```
+
+This enables advanced terminal management with:
+- **Smart session isolation** for different projects
+- **Automatic background process detection** for dev servers
+- **Real-time output monitoring** for long-running tasks
+- **Comprehensive command history** across all sessions
 
 ## 🛠️ MCP Tools Reference
 
@@ -253,7 +318,43 @@ go-term -config /path/to/custom/config.json -debug
 
 ## 🐛 Troubleshooting
 
-### Common Issues
+### Installation Issues
+
+**Go installation fails with permission errors:**
+```bash
+# Run with sudo for system-wide installation
+curl -fsSL https://raw.githubusercontent.com/rama-kairi/go-term/main/install.sh | sudo bash
+
+# Or install in user directory (recommended)
+export GOROOT=$HOME/.local/go
+export GOPATH=$HOME/go
+curl -fsSL https://raw.githubusercontent.com/rama-kairi/go-term/main/install.sh | bash
+```
+
+**VS Code MCP config not updating:**
+```bash
+# Check if jq is installed
+which jq || echo "Install jq: brew install jq (macOS) or apt install jq (Linux)"
+
+# Manually update VS Code config
+code "$HOME/Library/Application Support/Code/User/mcp.json"  # macOS
+code "$HOME/.config/Code/User/mcp.json"  # Linux
+```
+
+**Installation verification:**
+```bash
+# Check Go installation
+go version
+
+# Check GoTerm installation
+go-term --version 2>/dev/null || echo "GoTerm not in PATH"
+ls -la $(go env GOPATH)/bin/go-term
+
+# Test MCP server
+echo '{}' | go-term
+```
+
+### Runtime Issues
 
 **Sessions not appearing after creation**
 ```bash
