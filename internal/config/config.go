@@ -43,14 +43,18 @@ type ServerConfig struct {
 
 // SessionConfig holds session management configuration
 type SessionConfig struct {
-	MaxSessions      int           `json:"max_sessions"`
-	DefaultTimeout   time.Duration `json:"default_timeout"`
-	CleanupInterval  time.Duration `json:"cleanup_interval"`
-	MaxCommandLength int           `json:"max_command_length"`
-	MaxOutputSize    int           `json:"max_output_size"`
-	WorkingDir       string        `json:"working_dir"`
-	Shell            string        `json:"shell"`
-	EnableStreaming  bool          `json:"enable_streaming"`
+	MaxSessions             int           `json:"max_sessions"`
+	DefaultTimeout          time.Duration `json:"default_timeout"`
+	CleanupInterval         time.Duration `json:"cleanup_interval"`
+	MaxCommandLength        int           `json:"max_command_length"`
+	MaxOutputSize           int           `json:"max_output_size"`
+	WorkingDir              string        `json:"working_dir"`
+	Shell                   string        `json:"shell"`
+	EnableStreaming         bool          `json:"enable_streaming"`
+	MaxCommandsPerSession   int           `json:"max_commands_per_session"`
+	MaxBackgroundProcesses  int           `json:"max_background_processes"`
+	BackgroundOutputLimit   int           `json:"background_output_limit"`
+	ResourceCleanupInterval time.Duration `json:"resource_cleanup_interval"`
 }
 
 // DatabaseConfig holds database configuration
@@ -115,14 +119,18 @@ func DefaultConfig() *Config {
 			Debug:   false,
 		},
 		Session: SessionConfig{
-			MaxSessions:      50,               // Increased from 10
-			DefaultTimeout:   60 * time.Minute, // Increased from 30 minutes
-			CleanupInterval:  5 * time.Minute,
-			MaxCommandLength: 50000,            // Increased from 10000
-			MaxOutputSize:    10 * 1024 * 1024, // 10MB, increased from 1MB
-			WorkingDir:       "",               // Use current directory
-			Shell:            "",               // Use system default
-			EnableStreaming:  true,             // Enable real-time streaming
+			MaxSessions:             10,               // User requested: max 10 sessions
+			DefaultTimeout:          60 * time.Minute, // Increased from 30 minutes
+			CleanupInterval:         5 * time.Minute,
+			MaxCommandLength:        50000,            // Increased from 10000
+			MaxOutputSize:           10 * 1024 * 1024, // 10MB, increased from 1MB
+			WorkingDir:              "",               // Use current directory
+			Shell:                   "",               // Use system default
+			EnableStreaming:         true,             // Enable real-time streaming
+			MaxCommandsPerSession:   30,               // User requested: max 30 commands per session
+			MaxBackgroundProcesses:  3,                // User requested: max 3 background processes
+			BackgroundOutputLimit:   2000,             // Keep only latest 2000 characters of background output
+			ResourceCleanupInterval: 1 * time.Minute,  // Cleanup every minute
 		},
 		Database: DatabaseConfig{
 			Enable:            true,
@@ -276,6 +284,20 @@ func loadFromEnvironment(config *Config) {
 	if val := os.Getenv("TERMINAL_MCP_ENABLE_STREAMING"); val != "" {
 		config.Session.EnableStreaming = parseBool(val)
 	}
+	if val := os.Getenv("TERMINAL_MCP_MAX_COMMANDS_PER_SESSION"); val != "" {
+		config.Session.MaxCommandsPerSession = parseInt(val, config.Session.MaxCommandsPerSession)
+	}
+	if val := os.Getenv("TERMINAL_MCP_MAX_BACKGROUND_PROCESSES"); val != "" {
+		config.Session.MaxBackgroundProcesses = parseInt(val, config.Session.MaxBackgroundProcesses)
+	}
+	if val := os.Getenv("TERMINAL_MCP_BACKGROUND_OUTPUT_LIMIT"); val != "" {
+		config.Session.BackgroundOutputLimit = parseInt(val, config.Session.BackgroundOutputLimit)
+	}
+	if val := os.Getenv("TERMINAL_MCP_RESOURCE_CLEANUP_INTERVAL"); val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			config.Session.ResourceCleanupInterval = duration
+		}
+	}
 
 	// Database configuration
 	if val := os.Getenv("TERMINAL_MCP_DATA_DIR"); val != "" {
@@ -358,6 +380,22 @@ func validateConfig(config *Config) error {
 
 	if config.Session.MaxOutputSize <= 0 {
 		return fmt.Errorf("max_output_size must be greater than 0")
+	}
+
+	if config.Session.MaxCommandsPerSession <= 0 {
+		return fmt.Errorf("max_commands_per_session must be greater than 0")
+	}
+
+	if config.Session.MaxBackgroundProcesses <= 0 {
+		return fmt.Errorf("max_background_processes must be greater than 0")
+	}
+
+	if config.Session.BackgroundOutputLimit <= 0 {
+		return fmt.Errorf("background_output_limit must be greater than 0")
+	}
+
+	if config.Session.ResourceCleanupInterval <= 0 {
+		return fmt.Errorf("resource_cleanup_interval must be greater than 0")
 	}
 
 	if config.Security.MaxProcesses <= 0 {

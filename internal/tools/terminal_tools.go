@@ -18,31 +18,31 @@ import (
 
 // TerminalTools contains all MCP tools for terminal management with enhanced features
 type TerminalTools struct {
-	manager    *terminal.Manager
-	config     *config.Config
-	logger     *logger.Logger
-	database   *database.DB
-	security   *SecurityValidator
-	projectGen *utils.ProjectIDGenerator
+	manager        *terminal.Manager
+	config         *config.Config
+	logger         *logger.Logger
+	database       *database.DB
+	security       *SecurityValidator
+	projectGen     *utils.ProjectIDGenerator
+	packageManager *utils.PackageManagerDetector
 }
 
 // NewTerminalTools creates a new instance of terminal tools with enhanced features
 func NewTerminalTools(manager *terminal.Manager, cfg *config.Config, logger *logger.Logger, db *database.DB) *TerminalTools {
 	return &TerminalTools{
-		manager:    manager,
-		config:     cfg,
-		logger:     logger,
-		database:   db,
-		security:   NewSecurityValidator(cfg),
-		projectGen: utils.NewProjectIDGenerator(),
+		manager:        manager,
+		config:         cfg,
+		logger:         logger,
+		database:       db,
+		security:       NewSecurityValidator(cfg),
+		projectGen:     utils.NewProjectIDGenerator(),
+		packageManager: utils.NewPackageManagerDetector(),
 	}
 }
 
-// CreateSessionArgs represents arguments for creating a terminal session with project support
+// CreateSessionArgs represents arguments for creating a terminal session (simplified)
 type CreateSessionArgs struct {
-	Name       string `json:"name" jsonschema:"required,description,The name of the terminal session to create. Should be descriptive and meaningful for your project."`
-	ProjectID  string `json:"project_id,omitempty" jsonschema:"description,Optional project ID to associate with this session. If not provided will be auto-generated based on current directory. Format: folder_name_with_underscores_RANDOM (e.g. my_project_a7b3c9)"`
-	WorkingDir string `json:"working_dir,omitempty" jsonschema:"description,Optional working directory for the session. If not provided uses current directory. This affects project ID generation."`
+	Name string `json:"name" jsonschema:"required,description=Simple descriptive name for the terminal session"`
 }
 
 // CreateSessionResult represents the result of creating a terminal session with project info
@@ -60,22 +60,14 @@ type CreateSessionResult struct {
 func (t *TerminalTools) CreateSession(ctx context.Context, req *mcp.CallToolRequest, args CreateSessionArgs) (*mcp.CallToolResult, CreateSessionResult, error) {
 	// Validate session name
 	if err := validateSessionName(args.Name); err != nil {
-		return createErrorResult(fmt.Sprintf("Invalid session name: %v", err)), CreateSessionResult{}, nil
+		return createErrorResult(fmt.Sprintf("Invalid session name: %v. Tip: Session names should be 3-100 characters, alphanumeric with underscores and hyphens only. Examples: 'my-project', 'dev_server', 'testing_session'", err)), CreateSessionResult{}, nil
 	}
 
-	// Validate project ID if provided
-	if args.ProjectID != "" {
-		if err := t.projectGen.ValidateProjectID(args.ProjectID); err != nil {
-			return createErrorResult(fmt.Sprintf("Invalid project ID: %v", err)), CreateSessionResult{}, nil
-		}
-	}
-
-	session, err := t.manager.CreateSession(args.Name, args.ProjectID, args.WorkingDir)
+	// Create session with simplified API - let session manager handle workspace detection and project ID generation
+	session, err := t.manager.CreateSession(args.Name, "", "")
 	if err != nil {
 		t.logger.Error("Failed to create session", err, map[string]interface{}{
 			"session_name": args.Name,
-			"project_id":   args.ProjectID,
-			"working_dir":  args.WorkingDir,
 		})
 		return createErrorResult(fmt.Sprintf("Failed to create session: %v", err)), CreateSessionResult{}, nil
 	}
@@ -213,32 +205,37 @@ func (t *TerminalTools) ListSessions(ctx context.Context, req *mcp.CallToolReque
 
 // RunCommandArgs represents arguments for running a command with enhanced validation
 type RunCommandArgs struct {
-	SessionID string `json:"session_id" jsonschema:"required,description,The UUID4 identifier of the terminal session to run the command in. Use list_terminal_sessions to see available sessions."`
-	Command   string `json:"command" jsonschema:"required,description,The command to execute in the terminal session. Will be validated for security before execution."`
+	SessionID    string `json:"session_id" jsonschema:"required,description,The UUID4 identifier of the terminal session to run the command in. Use list_terminal_sessions to see available sessions."`
+	Command      string `json:"command" jsonschema:"required,description,The command to execute in the terminal session. Will be validated for security before execution. Directory changes (cd) persist across commands."`
+	IsBackground bool   `json:"is_background,omitempty" jsonschema:"description,Execute command in background for long-running processes (>30 seconds). Use sparingly - only for dev servers development tools that need to run indefinitely. Commands under 30 seconds should run in blocking mode."`
 }
 
 // RunCommandResult represents the enhanced result of running a command with detailed information
 type RunCommandResult struct {
-	SessionID     string `json:"session_id"`             // Session identifier
-	ProjectID     string `json:"project_id"`             // Project identifier
-	Command       string `json:"command"`                // The executed command
-	Output        string `json:"output"`                 // Standard output
-	ErrorOutput   string `json:"error_output,omitempty"` // Error output if any
-	Success       bool   `json:"success"`                // Whether command succeeded
-	ExitCode      int    `json:"exit_code"`              // Exit code from command
-	Duration      string `json:"duration"`               // Time taken to execute
-	WorkingDir    string `json:"working_dir"`            // Working directory during execution
-	CommandCount  int    `json:"command_count"`          // Total commands run in session
-	HistoryID     string `json:"history_id"`             // ID for this command in history
-	StreamingUsed bool   `json:"streaming_used"`         // Whether real-time streaming was used
-	TotalChunks   int    `json:"total_chunks,omitempty"` // Number of stream chunks if streaming was used
+	SessionID           string `json:"session_id"`                      // Session identifier
+	ProjectID           string `json:"project_id"`                      // Project identifier
+	Command             string `json:"command"`                         // The executed command
+	Output              string `json:"output"`                          // Standard output
+	ErrorOutput         string `json:"error_output,omitempty"`          // Error output if any
+	Success             bool   `json:"success"`                         // Whether command succeeded
+	ExitCode            int    `json:"exit_code"`                       // Exit code from command
+	Duration            string `json:"duration"`                        // Time taken to execute
+	WorkingDir          string `json:"working_dir"`                     // Working directory during execution
+	CommandCount        int    `json:"command_count"`                   // Total commands run in session
+	HistoryID           string `json:"history_id"`                      // ID for this command in history
+	StreamingUsed       bool   `json:"streaming_used"`                  // Whether real-time streaming was used
+	TotalChunks         int    `json:"total_chunks,omitempty"`          // Number of stream chunks if streaming was used
+	IsBackground        bool   `json:"is_background"`                   // Whether command is running in background
+	PackageManager      string `json:"package_manager,omitempty"`       // Detected package manager used
+	ProjectType         string `json:"project_type,omitempty"`          // Detected project type
+	BackgroundProcessID string `json:"background_process_id,omitempty"` // ID for background process tracking
 }
 
 // RunCommand executes a command in the specified terminal session with comprehensive tracking
 func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest, args RunCommandArgs) (*mcp.CallToolResult, RunCommandResult, error) {
 	// Validate input
 	if err := validateSessionID(args.SessionID); err != nil {
-		return createErrorResult(fmt.Sprintf("Invalid session ID: %v", err)), RunCommandResult{}, nil
+		return createErrorResult(fmt.Sprintf("Invalid session ID: %v. Tip: Session ID must be a valid UUID4. Use 'list_terminal_sessions' to find valid session IDs, or create a new session with 'create_terminal_session'.", err)), RunCommandResult{}, nil
 	}
 
 	if err := t.security.ValidateCommand(args.Command); err != nil {
@@ -247,65 +244,89 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 			"command":    args.Command,
 			"reason":     err.Error(),
 		})
-		return createErrorResult(fmt.Sprintf("Command blocked for security reasons: %v", err)), RunCommandResult{}, nil
+		return createErrorResult(fmt.Sprintf("Command blocked for security reasons: %v. Tip: Check if the command contains restricted characters or operations. Review security settings or use a different approach.", err)), RunCommandResult{}, nil
 	}
 
 	// Verify session exists
 	session, err := t.manager.GetSession(args.SessionID)
 	if err != nil {
-		return createErrorResult(fmt.Sprintf("Session not found: %v", err)), RunCommandResult{}, nil
+		return createErrorResult(fmt.Sprintf("Session not found: %v. Tip: Use 'list_terminal_sessions' to see all available sessions and their IDs. Make sure to create a session first with 'create_terminal_session'.", err)), RunCommandResult{}, nil
 	}
 
-	// Execute the command with streaming support if enabled
+	// Detect package manager and project type
+	packageManager := ""
+	projectType := t.packageManager.DetectProjectType(session.WorkingDir)
+	if pm, err := t.packageManager.DetectPackageManager(session.WorkingDir); err == nil && pm != nil {
+		packageManager = pm.Name
+	}
+
+	// Enhance command with package manager intelligence
+	enhancedCommand := t.enhanceCommandWithPackageManager(args.Command, session.WorkingDir)
+
+	// Determine if this should be a background process
+	shouldRunInBackground := args.IsBackground || t.shouldAutoDetectBackground(enhancedCommand)
+
+	// Execute the command - simplified approach
 	startTime := time.Now()
 	var output, errorOutput string
 	var success bool
 	var exitCode int
 	var totalChunks int
 	streamingUsed := false
+	var backgroundProcessID string // Declare early for both branches
 
-	// Check if streaming is enabled and use it for better real-time experience
-	if t.config.Streaming.Enable {
-		streamingUsed = true
-
-		// Use the manager's streaming command execution to maintain session state
-		streamOutput, streamErr := t.manager.ExecuteCommandWithStreaming(args.SessionID, args.Command)
-
-		success = streamErr == nil
-		exitCode = 0
-		output = streamOutput
-		totalChunks = 1 // Basic implementation, will be enhanced when full streaming is integrated
-
-		if streamErr != nil {
-			errorOutput = streamErr.Error()
-			exitCode = 1
-			success = false
-		}
-
-		t.logger.Info("Command executed with streaming", map[string]interface{}{
-			"session_id": args.SessionID,
-			"command":    args.Command,
-			"success":    success,
-			"streaming":  true,
-			"duration":   time.Since(startTime).String(),
-		})
-	} else {
-		// Fall back to traditional execution
-		output, err = t.manager.ExecuteCommand(args.SessionID, args.Command)
+	// Simple approach: if it should run in background, run it in background immediately
+	if shouldRunInBackground {
+		// Run command in background immediately
+		processID, err := t.manager.ExecuteCommandInBackground(args.SessionID, enhancedCommand)
 		success = err == nil
 		exitCode = 0
 
 		if err != nil {
 			errorOutput = err.Error()
 			exitCode = 1
+			success = false
+			output = fmt.Sprintf("Failed to start background process: %v", err)
+		} else {
+			output = fmt.Sprintf("Background process started in session %s. Command: %s", args.SessionID[:8], enhancedCommand)
+			// Store the process ID for monitoring
+			backgroundProcessID = processID
 		}
 
-		t.logger.Info("Command executed traditionally", map[string]interface{}{
-			"session_id": args.SessionID,
-			"command":    args.Command,
-			"success":    success,
-			"duration":   time.Since(startTime).String(),
+		t.logger.Info("Command started in background immediately", map[string]interface{}{
+			"session_id":            args.SessionID,
+			"command":               enhancedCommand,
+			"package_manager":       packageManager,
+			"project_type":          projectType,
+			"background_process_id": processID,
 		})
+	} else {
+		// Regular execution with streaming if enabled
+		if t.config.Streaming.Enable {
+			streamingUsed = true
+			streamOutput, streamErr := t.manager.ExecuteCommandWithStreaming(args.SessionID, enhancedCommand)
+
+			success = streamErr == nil
+			exitCode = 0
+			output = streamOutput
+			totalChunks = 1
+
+			if streamErr != nil {
+				errorOutput = streamErr.Error()
+				exitCode = 1
+				success = false
+			}
+		} else {
+			// Fall back to traditional execution
+			output, err = t.manager.ExecuteCommand(args.SessionID, enhancedCommand)
+			success = err == nil
+			exitCode = 0
+
+			if err != nil {
+				errorOutput = err.Error()
+				exitCode = 1
+			}
+		}
 	}
 
 	duration := time.Since(startTime)
@@ -317,20 +338,29 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 		commandCount = updatedSession.CommandCount
 	}
 
+	// Set backgroundProcessID based on whether command is running in background
+	if shouldRunInBackground {
+		backgroundProcessID = args.SessionID // Use same session for in-session background execution
+	}
+
 	result := RunCommandResult{
-		SessionID:     args.SessionID,
-		ProjectID:     session.ProjectID,
-		Command:       args.Command,
-		Output:        output,
-		ErrorOutput:   errorOutput,
-		Success:       success,
-		ExitCode:      exitCode,
-		Duration:      duration.String(),
-		WorkingDir:    session.WorkingDir,
-		CommandCount:  commandCount,
-		HistoryID:     fmt.Sprintf("%s_%d", args.SessionID[:8], commandCount),
-		StreamingUsed: streamingUsed,
-		TotalChunks:   totalChunks,
+		SessionID:           args.SessionID,
+		ProjectID:           session.ProjectID,
+		Command:             enhancedCommand,
+		Output:              output,
+		ErrorOutput:         errorOutput,
+		Success:             success,
+		ExitCode:            exitCode,
+		Duration:            duration.String(),
+		WorkingDir:          session.WorkingDir,
+		CommandCount:        commandCount,
+		HistoryID:           fmt.Sprintf("%s_%d", args.SessionID[:8], commandCount),
+		StreamingUsed:       streamingUsed,
+		TotalChunks:         totalChunks,
+		IsBackground:        shouldRunInBackground,
+		PackageManager:      packageManager,
+		ProjectType:         projectType,
+		BackgroundProcessID: backgroundProcessID,
 	}
 
 	// Create response
@@ -342,16 +372,48 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 	}
 
 	t.logger.Info("Command executed", map[string]interface{}{
-		"session_id": args.SessionID,
-		"project_id": session.ProjectID,
-		"success":    success,
-		"duration":   duration.String(),
+		"session_id":      args.SessionID,
+		"project_id":      session.ProjectID,
+		"success":         success,
+		"duration":        duration.String(),
+		"is_background":   shouldRunInBackground,
+		"package_manager": packageManager,
+		"project_type":    projectType,
 	})
 
 	return &mcp.CallToolResult{
 		Content: content,
 		IsError: false,
 	}, result, nil
+}
+
+// enhanceCommandWithPackageManager enhances commands with appropriate package manager
+func (t *TerminalTools) enhanceCommandWithPackageManager(command, workingDir string) string {
+	// Simple enhancement - in production this would be more sophisticated
+	if strings.Contains(command, "npm run") {
+		// Check if bun is available and preferred
+		if pm, err := t.packageManager.DetectPackageManager(workingDir); err == nil && pm != nil {
+			if pm.Name == "bun" {
+				return strings.Replace(command, "npm run", "bun run", 1)
+			}
+		}
+	}
+
+	// For Python scripts, prefer uv if available
+	if strings.HasSuffix(command, ".py") && !strings.Contains(command, "uv run") {
+		if pm, err := t.packageManager.DetectPackageManager(workingDir); err == nil && pm != nil {
+			if pm.Name == "uv" {
+				return "uv run " + command
+			}
+		}
+	}
+
+	return command
+}
+
+// shouldAutoDetectBackground determines if a command should run in background
+func (t *TerminalTools) shouldAutoDetectBackground(command string) bool {
+	return t.packageManager.IsDevServerCommand(command) || t.packageManager.IsLongRunningCommand(command)
 }
 
 // SearchHistoryArgs represents arguments for searching command history
@@ -374,7 +436,7 @@ type SearchHistoryArgs struct {
 // SearchHistoryResult represents the result of searching command history
 type SearchHistoryResult struct {
 	TotalFound   int                       `json:"total_found"`
-	Results      []*database.CommandRecord `json:"results"`
+	Results      []*database.CommandResult `json:"results"`
 	Query        SearchHistoryArgs         `json:"query"`
 	SearchTime   string                    `json:"search_time"`
 	ProjectStats map[string]int            `json:"project_stats"` // project_id -> command_count in results
@@ -413,7 +475,7 @@ func (t *TerminalTools) SearchHistory(ctx context.Context, req *mcp.CallToolRequ
 		if t, err := time.Parse(time.RFC3339, args.StartTime); err == nil {
 			startTimeFilter = t
 		} else {
-			return createErrorResult(fmt.Sprintf("Invalid start_time format. Use ISO 8601 format: %s", time.RFC3339)), SearchHistoryResult{}, nil
+			return createErrorResult(fmt.Sprintf("Invalid start_time format. Use ISO 8601 format: %s. Example: %s", time.RFC3339, time.Now().Add(-24*time.Hour).Format(time.RFC3339))), SearchHistoryResult{}, nil
 		}
 	}
 
@@ -421,7 +483,7 @@ func (t *TerminalTools) SearchHistory(ctx context.Context, req *mcp.CallToolRequ
 		if t, err := time.Parse(time.RFC3339, args.EndTime); err == nil {
 			endTimeFilter = t
 		} else {
-			return createErrorResult(fmt.Sprintf("Invalid end_time format. Use ISO 8601 format: %s", time.RFC3339)), SearchHistoryResult{}, nil
+			return createErrorResult(fmt.Sprintf("Invalid end_time format. Use ISO 8601 format: %s. Example: %s", time.RFC3339, time.Now().Format(time.RFC3339))), SearchHistoryResult{}, nil
 		}
 	}
 
@@ -435,7 +497,7 @@ func (t *TerminalTools) SearchHistory(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	// Execute database search
-	commands, err := t.database.SearchCommands(
+	commands, err := t.database.SearchCommandsFormatted(
 		args.SessionID,
 		args.ProjectID,
 		args.Command,
@@ -708,16 +770,16 @@ type DeleteSessionResult struct {
 func (t *TerminalTools) DeleteSession(ctx context.Context, req *mcp.CallToolRequest, args DeleteSessionArgs) (*mcp.CallToolResult, DeleteSessionResult, error) {
 	// Require confirmation
 	if !args.Confirm {
-		return createErrorResult("Deletion requires confirmation. Set 'confirm' to true."), DeleteSessionResult{}, nil
+		return createErrorResult("Deletion requires confirmation. Set 'confirm' to true. Tip: This prevents accidental deletion of sessions and command history."), DeleteSessionResult{}, nil
 	}
 
 	// Validate arguments - must specify either session_id or project_id, but not both
 	if args.SessionID == "" && args.ProjectID == "" {
-		return createErrorResult("Must specify either session_id or project_id"), DeleteSessionResult{}, nil
+		return createErrorResult("Must specify either session_id or project_id. Tip: Use session_id to delete a single session, or project_id to delete all sessions in a project."), DeleteSessionResult{}, nil
 	}
 
 	if args.SessionID != "" && args.ProjectID != "" {
-		return createErrorResult("Cannot specify both session_id and project_id. Choose one."), DeleteSessionResult{}, nil
+		return createErrorResult("Cannot specify both session_id and project_id. Choose one. Tip: Use session_id to delete a single session, or project_id to delete all sessions in a project."), DeleteSessionResult{}, nil
 	}
 
 	var deletedCount int
@@ -798,6 +860,121 @@ func (t *TerminalTools) DeleteSession(ctx context.Context, req *mcp.CallToolRequ
 
 	return &mcp.CallToolResult{
 		Content: content,
+		IsError: false,
+	}, result, nil
+}
+
+// CheckBackgroundProcessArgs represents arguments for checking background process status
+type CheckBackgroundProcessArgs struct {
+	SessionID string `json:"session_id" jsonschema:"required,description,The UUID4 identifier of the session running the background process."`
+	ProcessID string `json:"process_id,omitempty" jsonschema:"description,Optional background process ID. If not provided will check the latest background process for the session."`
+}
+
+// CheckBackgroundProcessResult represents the result of checking a background process
+type CheckBackgroundProcessResult struct {
+	SessionID   string `json:"session_id"`
+	ProcessID   string `json:"process_id"`
+	IsRunning   bool   `json:"is_running"`
+	Output      string `json:"output"`
+	ErrorOutput string `json:"error_output"`
+	StartTime   string `json:"start_time"`
+	Duration    string `json:"duration"`
+	Command     string `json:"command"`
+	PID         int    `json:"pid,omitempty"`
+	Status      string `json:"status"` // "running", "completed", "failed", "not_found"
+	LastChecked string `json:"last_checked"`
+}
+
+// CheckBackgroundProcess checks the output and status of background processes for agents
+func (t *TerminalTools) CheckBackgroundProcess(ctx context.Context, req *mcp.CallToolRequest, args CheckBackgroundProcessArgs) (*mcp.CallToolResult, CheckBackgroundProcessResult, error) {
+	t.logger.Info("Checking background process status", map[string]interface{}{
+		"session_id": args.SessionID,
+		"process_id": args.ProcessID,
+	})
+
+	// Get the background process directly from session tracking
+	bgProcess, err := t.manager.GetBackgroundProcess(args.SessionID, args.ProcessID)
+	if err != nil {
+		return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{
+						Text: fmt.Sprintf("Error: %v", err),
+					},
+				},
+				IsError: true,
+			}, CheckBackgroundProcessResult{
+				SessionID:   args.SessionID,
+				Status:      "not_found",
+				LastChecked: time.Now().Format("2006-01-02 15:04:05"),
+			}, nil // Don't return error to allow graceful handling
+	}
+
+	// Thread-safe access to background process data
+	bgProcess.Mutex.RLock()
+	processID := bgProcess.ID
+	command := bgProcess.Command
+	pid := bgProcess.PID
+	startTime := bgProcess.StartTime
+	isRunning := bgProcess.IsRunning
+	exitCode := bgProcess.ExitCode
+	output := bgProcess.Output
+	errorOutput := bgProcess.ErrorOutput
+	bgProcess.Mutex.RUnlock()
+
+	// Calculate duration
+	var duration string
+	if isRunning {
+		duration = time.Since(startTime).String()
+	} else {
+		// For completed processes, we could calculate from stored data or estimate
+		duration = time.Since(startTime).String()
+	}
+
+	// Determine status
+	status := "running"
+	if !isRunning {
+		if exitCode == 0 {
+			status = "completed"
+		} else {
+			status = "failed"
+		}
+	}
+
+	result := CheckBackgroundProcessResult{
+		SessionID:   args.SessionID,
+		ProcessID:   processID,
+		IsRunning:   isRunning,
+		Output:      output,
+		ErrorOutput: errorOutput,
+		StartTime:   startTime.Format(time.RFC3339),
+		Duration:    duration,
+		Command:     command,
+		PID:         pid,
+		Status:      status,
+		LastChecked: time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	// Create response message
+	var statusMsg string
+	if isRunning {
+		statusMsg = fmt.Sprintf("Background process %s is running (PID: %d). Command: %s", processID[:8], pid, command)
+	} else {
+		statusMsg = fmt.Sprintf("Background process %s has %s with exit code %d. Command: %s", processID[:8], status, exitCode, command)
+	}
+
+	if output != "" {
+		statusMsg += fmt.Sprintf("\n\nOutput:\n%s", output)
+	}
+	if errorOutput != "" {
+		statusMsg += fmt.Sprintf("\n\nError Output:\n%s", errorOutput)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: statusMsg,
+			},
+		},
 		IsError: false,
 	}, result, nil
 }

@@ -37,7 +37,7 @@
           "description": "Maximum number of concurrent sessions",
           "minimum": 1,
           "maximum": 100,
-          "default": 50
+          "default": 10
         },
         "default_timeout": {
           "type": "string",
@@ -79,9 +79,36 @@
           "type": "boolean",
           "description": "Enable real-time command output streaming",
           "default": true
+        },
+        "max_commands_per_session": {
+          "type": "integer",
+          "description": "Maximum number of commands stored per session in database",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 30
+        },
+        "max_background_processes": {
+          "type": "integer",
+          "description": "Maximum number of background processes per session",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 3
+        },
+        "background_output_limit": {
+          "type": "integer",
+          "description": "Maximum characters to keep from background process output (latest content)",
+          "minimum": 100,
+          "maximum": 50000,
+          "default": 2000
+        },
+        "resource_cleanup_interval": {
+          "type": "string",
+          "description": "Resource cleanup interval for sessions, processes, and output (Go duration format)",
+          "pattern": "^\\d+[smhd]$",
+          "default": "1m"
         }
       },
-      "required": ["max_sessions", "default_timeout", "cleanup_interval", "max_command_length", "max_output_size", "enable_streaming"],
+      "required": ["max_sessions", "default_timeout", "cleanup_interval", "max_command_length", "max_output_size", "enable_streaming", "max_commands_per_session", "max_background_processes", "background_output_limit", "resource_cleanup_interval"],
       "additionalProperties": false
     },
     "database": {

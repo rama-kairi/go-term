@@ -56,14 +56,29 @@ type StreamChunk struct {
 	SequenceNum int       `json:"sequence_num"`
 }
 
+// CommandResult represents a formatted command result for API responses
+type CommandResult struct {
+	ID          string `json:"id"`
+	SessionID   string `json:"session_id"`
+	ProjectID   string `json:"project_id"`
+	Command     string `json:"command"`
+	Output      string `json:"output"`
+	ErrorOutput string `json:"error_output"`
+	Success     bool   `json:"success"`
+	ExitCode    int    `json:"exit_code"`
+	Duration    int64  `json:"duration_ms"`
+	WorkingDir  string `json:"working_dir"`
+	Timestamp   string `json:"timestamp"` // RFC3339 formatted string
+	Tags        string `json:"tags"`
+}
+
 // NewDB creates a new database connection
-func NewDB(dataDir string) (*DB, error) {
-	// Ensure the data directory exists
+func NewDB(dbPath string) (*DB, error) {
+	// Ensure the directory exists
+	dataDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
-
-	dbPath := filepath.Join(dataDir, "go-term.db")
 
 	conn, err := sql.Open("sqlite3", dbPath+"?_journal=WAL&_timeout=5000&_fk=1")
 	if err != nil {
@@ -153,6 +168,27 @@ func (db *DB) Close() error {
 	if db.conn != nil {
 		return db.conn.Close()
 	}
+	return nil
+}
+
+// HealthCheck performs a simple database connectivity check
+func (db *DB) HealthCheck() error {
+	if db.conn == nil {
+		return fmt.Errorf("database connection is nil")
+	}
+
+	// Simple ping to test connectivity
+	if err := db.conn.Ping(); err != nil {
+		return fmt.Errorf("database ping failed: %w", err)
+	}
+
+	// Test a simple query
+	var count int
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&count)
+	if err != nil {
+		return fmt.Errorf("database query test failed: %w", err)
+	}
+
 	return nil
 }
 
@@ -404,6 +440,39 @@ func (db *DB) SearchCommands(sessionID, projectID, command, output string, succe
 	return commands, rows.Err()
 }
 
+// ToCommandResult converts a CommandRecord to CommandResult with formatted timestamps
+func (cmd *CommandRecord) ToCommandResult() *CommandResult {
+	return &CommandResult{
+		ID:          cmd.ID,
+		SessionID:   cmd.SessionID,
+		ProjectID:   cmd.ProjectID,
+		Command:     cmd.Command,
+		Output:      cmd.Output,
+		ErrorOutput: cmd.ErrorOutput,
+		Success:     cmd.Success,
+		ExitCode:    cmd.ExitCode,
+		Duration:    cmd.Duration,
+		WorkingDir:  cmd.WorkingDir,
+		Timestamp:   cmd.Timestamp.Format(time.RFC3339),
+		Tags:        cmd.Tags,
+	}
+}
+
+// SearchCommandsFormatted searches command history and returns formatted results
+func (db *DB) SearchCommandsFormatted(sessionID, projectID, command, output string, success *bool, startTime, endTime time.Time, limit int) ([]*CommandResult, error) {
+	records, err := db.SearchCommands(sessionID, projectID, command, output, success, startTime, endTime, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]*CommandResult, len(records))
+	for i, record := range records {
+		results[i] = record.ToCommandResult()
+	}
+
+	return results, nil
+}
+
 // Stream operations
 
 // CreateStreamChunk stores a real-time stream chunk
@@ -512,4 +581,55 @@ func (db *DB) GetProjectStats(projectID string) (map[string]interface{}, error) 
 		"failed_commands":     totalCommands - successfulCommands,
 		"avg_duration_ms":     avgDuration,
 	}, nil
+}
+
+// SessionWithStats represents a session with dynamically calculated statistics
+type SessionWithStats struct {
+	SessionRecord
+	CommandCount  int           `json:"command_count"`
+	SuccessCount  int           `json:"success_count"`
+	TotalDuration time.Duration `json:"total_duration"`
+}
+
+// GetSessionsWithStats returns all sessions with dynamically calculated statistics
+func (db *DB) GetSessionsWithStats() ([]*SessionWithStats, error) {
+	query := `
+	SELECT
+		s.id, s.name, s.project_id, s.working_dir, s.environment,
+		s.created_at, s.last_used_at, s.is_active,
+		COALESCE(COUNT(c.id), 0) as command_count,
+		COALESCE(SUM(CASE WHEN c.success THEN 1 ELSE 0 END), 0) as success_count,
+		COALESCE(SUM(c.duration_ms), 0) as total_duration_ms
+	FROM sessions s
+	LEFT JOIN commands c ON s.id = c.session_id
+	GROUP BY s.id, s.name, s.project_id, s.working_dir, s.environment,
+			 s.created_at, s.last_used_at, s.is_active
+	ORDER BY s.last_used_at DESC
+	`
+
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []*SessionWithStats
+	for rows.Next() {
+		session := &SessionWithStats{}
+		var totalDurationMs int64
+
+		err := rows.Scan(
+			&session.ID, &session.Name, &session.ProjectID, &session.WorkingDir, &session.Environment,
+			&session.CreatedAt, &session.LastUsedAt, &session.IsActive,
+			&session.CommandCount, &session.SuccessCount, &totalDurationMs,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		session.TotalDuration = time.Duration(totalDurationMs) * time.Millisecond
+		sessions = append(sessions, session)
+	}
+
+	return sessions, rows.Err()
 }

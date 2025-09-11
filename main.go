@@ -54,7 +54,7 @@ func main() {
 	var db *database.DB
 	if cfg.Database.Enable {
 		var err error
-		db, err = database.NewDB(cfg.Database.DataDir)
+		db, err = database.NewDB(cfg.Database.Path)
 		if err != nil {
 			log.Fatalf("Failed to initialize database: %v", err)
 		}
@@ -90,7 +90,7 @@ func main() {
 	// Register create terminal session tool with enhanced features
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "create_terminal_session",
-		Description: "Create a new terminal session with project association and comprehensive tracking. Project IDs are auto-generated based on current directory (format: folder_name_with_underscores_RANDOM). Use this to start organized terminal work within projects.",
+		Description: "Create a new terminal session with project association and comprehensive tracking. Project IDs are auto-generated based on current directory (format: folder_name_with_underscores_RANDOM). Use this to start organized terminal work within projects. SOLVES VSCode Copilot Issues: (1) Session isolation prevents interference between concurrent tasks, (2) Reliable session management without state loss, (3) Project-based organization for better workflow management. Each session maintains independent working directory and environment state.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -114,7 +114,7 @@ func main() {
 	// Register list terminal sessions tool with enhanced information
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_terminal_sessions",
-		Description: "List all existing terminal sessions with comprehensive information including project association, command statistics, and session health. Use this to see all active sessions and their status.",
+		Description: "List all existing terminal sessions with comprehensive information including project association, command statistics, and session health. Use this to see all active sessions and their status. SOLVES VSCode Copilot Issues: (1) Clear session visibility and management, (2) Prevents confusion about which terminals are running what processes, (3) Shows command execution statistics and success rates for troubleshooting, (4) Project-based grouping for better organization. Helps avoid the common VSCode Copilot issue of running commands in terminals with active background processes.",
 		InputSchema: &jsonschema.Schema{
 			Type:       "object",
 			Properties: map[string]*jsonschema.Schema{},
@@ -124,7 +124,7 @@ func main() {
 	// Register run command tool with enhanced tracking
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_command",
-		Description: "Execute a command in a specific terminal session with comprehensive tracking and security validation. All commands are logged to session history for later search and analysis. Working directory changes persist across commands.",
+		Description: "Execute a command in a specific terminal session with comprehensive tracking, intelligent package management, and automatic background execution for long-running processes. KEY FEATURES: (1) AUTOMATIC BACKGROUND DETECTION - Long-running processes (dev servers, HTTP servers, file watchers) are automatically detected and executed in isolated background sessions to prevent blocking, (2) Intelligent package manager optimization (prefers bun for Node.js, uv for Python), (3) Security validation and command enhancement, (4) Complete command history tracking. AUTOMATIC BACKGROUND TRIGGERS: Python scripts containing 'server', 'http_server', 'app.py', Flask/Django/FastAPI apps; Node.js scripts with 'server.js', 'app.js', Express/Fastify apps; Commands with 'dev', 'serve', 'start', 'watch'. SOLVES VSCode Copilot Issues: (1) Prevents hanging on long-running processes, (2) Reliable output capture, (3) Proper session isolation, (4) Background process management. Use 'is_background: false' to force foreground execution if needed.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -134,7 +134,15 @@ func main() {
 				},
 				"command": {
 					Type:        "string",
-					Description: "The command to execute in the terminal session. Will be validated for security before execution. Directory changes (cd) persist across commands.",
+					Description: "The command to execute. AUTOMATIC BACKGROUND DETECTION: Commands containing server scripts (http_server.py, server.js, app.py, dev servers) are automatically executed in background sessions to prevent blocking. Enhanced with intelligent package manager detection (prefers bun for Node.js, uv for Python). Directory changes (cd) persist across commands.",
+				},
+				"is_background": {
+					Type:        "boolean",
+					Description: "Optional: Override automatic background detection. Set to 'false' to force foreground execution of detected long-running processes, or 'true' to force background execution of regular commands.",
+				},
+				"timeout_test": {
+					Type:        "boolean",
+					Description: "Optional: Test command with 10-second timeout to verify responsiveness before full execution. Useful for potentially hanging commands.",
 				},
 			},
 			Required: []string{"session_id", "command"},
@@ -144,7 +152,7 @@ func main() {
 	// Register search history tool for command discovery
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_terminal_history",
-		Description: "Search through command history across all terminal sessions and projects. Use this to quickly find previously executed commands, check command outputs, analyze patterns, or troubleshoot issues. Supports filtering by project, session, command text, output text, success status, time range, and more.",
+		Description: "Search through command history across all terminal sessions and projects. Use this to quickly find previously executed commands, check command outputs, analyze patterns, or troubleshoot issues. Supports filtering by project, session, command text, output text, success status, time range, and more. SOLVES VSCode Copilot Issues: (1) Persistent command history that doesn't get lost between sessions, (2) Advanced search capabilities to find specific commands or outputs, (3) Project-based filtering for organized workflow management, (4) Success/failure analysis for debugging. Unlike VSCode's limited terminal history, this provides comprehensive searchable records.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -229,8 +237,28 @@ func main() {
 		},
 	}, terminalTools.DeleteSession)
 
+	// Register background process monitoring tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_background_process",
+		Description: "Check the output and status of background processes for agents. This allows agents to monitor long-running processes like development servers, HTTP servers, and other background tasks that were started with automatic background detection. SOLVES VSCode Copilot Issues: (1) Agents can check output of background processes without losing context, (2) Monitor status of dev servers and long-running tasks, (3) Retrieve output from processes that were started in background sessions.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "The UUID4 identifier of the session running the background process.",
+				},
+				"process_id": {
+					Type:        "string",
+					Description: "Optional background process ID. If not provided will check the latest background process for the session.",
+				},
+			},
+			Required: []string{"session_id"},
+		},
+	}, terminalTools.CheckBackgroundProcess)
+
 	appLogger.Info("Terminal MCP Server registered all tools successfully", map[string]interface{}{
-		"tools_count": 5,
+		"tools_count": 6,
 	})
 	appLogger.Info("Available tools:")
 	appLogger.Info("  - create_terminal_session: Create a new terminal session with project association and comprehensive tracking")
@@ -238,6 +266,7 @@ func main() {
 	appLogger.Info("  - run_command: Execute a command in a specific terminal session with full history tracking")
 	appLogger.Info("  - search_terminal_history: Search through command history across all sessions and projects")
 	appLogger.Info("  - delete_session: Delete terminal sessions (individual or project-wide) with confirmation")
+	appLogger.Info("  - check_background_process: Check output and status of background processes for agents")
 
 	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
