@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/rama-kairi/go-term/internal/config"
 	"github.com/rama-kairi/go-term/internal/database"
 	"github.com/rama-kairi/go-term/internal/logger"
+	"github.com/rama-kairi/go-term/internal/monitoring"
 	"github.com/rama-kairi/go-term/internal/utils"
 )
 
@@ -110,6 +112,10 @@ type Session struct {
 	stderr io.ReadCloser
 	mutex  sync.RWMutex
 
+	// Context for cancellation support
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// Persistent shell state tracking
 	currentDir string
 	shellPid   int
@@ -133,11 +139,19 @@ type Manager struct {
 	resourceTicker      *time.Ticker
 	stopCleanup         chan bool
 	stopResourceCleanup chan bool
+	resourceMonitor     *monitoring.ResourceMonitor
+
+	// Context for manager-wide cancellation
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewManager creates a new terminal session manager with enhanced features
 func NewManager(cfg *config.Config, logger *logger.Logger, db *database.DB) *Manager {
 	projectIDGen := utils.NewProjectIDGenerator()
+
+	// Create manager context for cancellation support
+	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &Manager{
 		sessions:            make(map[string]*Session),
@@ -147,11 +161,23 @@ func NewManager(cfg *config.Config, logger *logger.Logger, db *database.DB) *Man
 		projectIDGen:        projectIDGen,
 		stopCleanup:         make(chan bool),
 		stopResourceCleanup: make(chan bool),
+		ctx:                 ctx,
+		cancel:              cancel,
 	}
+
+	// Initialize resource monitor
+	manager.resourceMonitor = monitoring.NewResourceMonitor(logger, 30*time.Second)
+	manager.resourceMonitor.SetCounters(
+		func() int { return len(manager.sessions) },
+		func() int { return manager.getTotalBackgroundProcesses() },
+	)
 
 	// Start cleanup routines
 	manager.startCleanupRoutine()
 	manager.startResourceCleanupRoutine()
+
+	// Start resource monitoring
+	manager.resourceMonitor.Start(manager.ctx)
 
 	return manager
 }
@@ -354,6 +380,9 @@ func (m *Manager) CreateSession(name string, projectID string, workingDir string
 		return nil, fmt.Errorf("failed to create working directory: %w", err)
 	}
 
+	// Create session context for cancellation support
+	sessionCtx, sessionCancel := context.WithCancel(m.ctx)
+
 	session := &Session{
 		ID:                  sessionID,
 		Name:                name,
@@ -369,6 +398,8 @@ func (m *Manager) CreateSession(name string, projectID string, workingDir string
 		BackgroundProcesses: make(map[string]*BackgroundProcess),
 		currentDir:          workingDir,
 		shellEnv:            make(map[string]string),
+		ctx:                 sessionCtx,
+		cancel:              sessionCancel,
 	}
 
 	// Copy environment variables
@@ -592,23 +623,31 @@ func (m *Manager) ExecuteCommand(sessionID, command string) (string, error) {
 
 	// Store command in database if available
 	if m.database != nil {
-		dbErr := m.database.StoreCommand(
-			sessionID,
-			session.ProjectID,
-			command,
-			output,
-			exitCode,
-			success,
-			startTime,
-			endTime,
-			duration,
-			session.currentDir,
-		)
+		// Check database health before using it
+		if dbHealthErr := m.database.HealthCheck(); dbHealthErr == nil {
+			dbErr := m.database.StoreCommand(
+				sessionID,
+				session.ProjectID,
+				command,
+				output,
+				exitCode,
+				success,
+				startTime,
+				endTime,
+				duration,
+				session.currentDir,
+			)
 
-		if dbErr != nil {
-			m.logger.Error("Failed to store command in database", dbErr, map[string]interface{}{
+			if dbErr != nil {
+				m.logger.Error("Failed to store command in database", dbErr, map[string]interface{}{
+					"session_id": sessionID,
+					"command":    command,
+				})
+			}
+		} else {
+			m.logger.Debug("Database not available for storing command", map[string]interface{}{
 				"session_id": sessionID,
-				"command":    command,
+				"error":      dbHealthErr.Error(),
 			})
 		}
 	}
@@ -674,23 +713,31 @@ func (m *Manager) ExecuteCommandWithStreaming(sessionID, command string) (string
 
 	// Store command in database if available
 	if m.database != nil {
-		dbErr := m.database.StoreCommand(
-			sessionID,
-			session.ProjectID,
-			command,
-			output,
-			exitCode,
-			err == nil,
-			startTime,
-			endTime,
-			duration,
-			session.currentDir,
-		)
+		// Check database health before using it
+		if dbHealthErr := m.database.HealthCheck(); dbHealthErr == nil {
+			dbErr := m.database.StoreCommand(
+				sessionID,
+				session.ProjectID,
+				command,
+				output,
+				exitCode,
+				err == nil,
+				startTime,
+				endTime,
+				duration,
+				session.currentDir,
+			)
 
-		if dbErr != nil {
-			m.logger.Error("Failed to store streaming command in database", dbErr, map[string]interface{}{
+			if dbErr != nil {
+				m.logger.Error("Failed to store streaming command in database", dbErr, map[string]interface{}{
+					"session_id": sessionID,
+					"command":    command,
+				})
+			}
+		} else {
+			m.logger.Debug("Database not available for storing streaming command", map[string]interface{}{
 				"session_id": sessionID,
-				"command":    command,
+				"error":      dbHealthErr.Error(),
 			})
 		}
 	}
@@ -829,6 +876,11 @@ func (m *Manager) CloseSession(sessionID string) error {
 
 	session.IsActive = false
 
+	// Cancel session context to stop all background processes and operations
+	if session.cancel != nil {
+		session.cancel()
+	}
+
 	// Close pipes
 	if session.stdin != nil {
 		session.stdin.Close()
@@ -861,11 +913,19 @@ func (m *Manager) CloseSession(sessionID string) error {
 
 	// Clean up database records
 	if m.database != nil {
-		if err := m.database.DeleteSession(sessionID); err != nil {
-			m.logger.Error("Failed to delete session from database", err, map[string]interface{}{
+		// Check if database is still available before trying to delete
+		if dbHealthErr := m.database.HealthCheck(); dbHealthErr == nil {
+			if err := m.database.DeleteSession(sessionID); err != nil {
+				m.logger.Error("Failed to delete session from database", err, map[string]interface{}{
+					"session_id": sessionID,
+				})
+				// Don't return error here as we still want to clean up the in-memory session
+			}
+		} else {
+			m.logger.Debug("Database not available for session deletion", map[string]interface{}{
 				"session_id": sessionID,
+				"error":      dbHealthErr.Error(),
 			})
-			// Don't return error here as we still want to clean up the in-memory session
 		}
 	}
 
@@ -978,6 +1038,25 @@ func (m *Manager) GetSessionStats() SessionStats {
 	}
 
 	return stats
+}
+
+// getTotalBackgroundProcesses returns the total number of background processes across all sessions
+func (m *Manager) getTotalBackgroundProcesses() int {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	total := 0
+	for _, session := range m.sessions {
+		session.mutex.RLock()
+		total += len(session.BackgroundProcesses)
+		session.mutex.RUnlock()
+	}
+	return total
+}
+
+// GetResourceMonitor returns the resource monitor instance
+func (m *Manager) GetResourceMonitor() *monitoring.ResourceMonitor {
+	return m.resourceMonitor
 }
 
 // startCleanupRoutine starts the automatic cleanup routine for inactive sessions
@@ -1191,8 +1270,18 @@ func (m *Manager) cleanupExcessCommands() {
 
 // Shutdown gracefully shuts down the manager
 func (m *Manager) Shutdown() {
+	// Cancel manager context to signal all operations to stop
+	if m.cancel != nil {
+		m.cancel()
+	}
+
 	close(m.stopCleanup)
 	close(m.stopResourceCleanup)
+
+	// Stop resource monitor
+	if m.resourceMonitor != nil {
+		m.resourceMonitor.Stop()
+	}
 
 	// Close all active sessions
 	m.mutex.RLock()
@@ -1209,6 +1298,11 @@ func (m *Manager) Shutdown() {
 			})
 		}
 	}
+}
+
+// GetGoroutineCount returns the current number of goroutines (for testing)
+func GetGoroutineCount() int {
+	return runtime.NumGoroutine()
 }
 
 // copySession creates a safe copy of a session for external use
@@ -1269,6 +1363,14 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 		return "", fmt.Errorf("session not found: %v", err)
 	}
 
+	// Check if session context is cancelled before starting
+	select {
+	case <-session.ctx.Done():
+		return "", fmt.Errorf("session is shutting down: %v", session.ctx.Err())
+	default:
+		// Continue with background process creation
+	}
+
 	// Check background process limit
 	session.mutex.Lock()
 	if len(session.BackgroundProcesses) >= m.config.Session.MaxBackgroundProcesses {
@@ -1301,13 +1403,34 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 
 	// Start the command in the background with proper process tracking
 	go func() {
-		ctx := context.Background()
+		// Check context again at start of goroutine
+		select {
+		case <-session.ctx.Done():
+			bgProcess.Mutex.Lock()
+			bgProcess.IsRunning = false
+			bgProcess.ExitCode = -1
+			bgProcess.ErrorOutput = fmt.Sprintf("Session context cancelled: %v", session.ctx.Err())
+			bgProcess.Mutex.Unlock()
+			return
+		default:
+			// Continue with command execution
+		}
+
+		// Create cancellable context with timeout that respects session cancellation
+		ctx, cancel := context.WithTimeout(session.ctx, 24*time.Hour) // Max 24 hour timeout for background processes
+		defer cancel()
+
 		startTime := time.Now()
 
 		// Prepare command for execution
 		parts := strings.Fields(command)
 		if len(parts) == 0 {
 			m.logger.Error("Empty command provided", nil)
+			bgProcess.Mutex.Lock()
+			bgProcess.IsRunning = false
+			bgProcess.ExitCode = -1
+			bgProcess.ErrorOutput = "Empty command provided"
+			bgProcess.Mutex.Unlock()
 			return
 		}
 
@@ -1321,17 +1444,38 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
 		}
 
-		// Create pipes for output capture
+		// Create pipes for output capture with proper cleanup
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			m.logger.Error("Failed to create stdout pipe", err)
+			bgProcess.Mutex.Lock()
+			bgProcess.IsRunning = false
+			bgProcess.ExitCode = -1
+			bgProcess.ErrorOutput = fmt.Sprintf("Failed to create stdout pipe: %v", err)
+			bgProcess.Mutex.Unlock()
 			return
 		}
+		defer func() {
+			if stdout != nil {
+				stdout.Close()
+			}
+		}()
+
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
 			m.logger.Error("Failed to create stderr pipe", err)
+			bgProcess.Mutex.Lock()
+			bgProcess.IsRunning = false
+			bgProcess.ExitCode = -1
+			bgProcess.ErrorOutput = fmt.Sprintf("Failed to create stderr pipe: %v", err)
+			bgProcess.Mutex.Unlock()
 			return
 		}
+		defer func() {
+			if stderr != nil {
+				stderr.Close()
+			}
+		}()
 
 		// Update background process with cmd reference
 		bgProcess.Mutex.Lock()
@@ -1352,44 +1496,92 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 		// Update PID
 		bgProcess.Mutex.Lock()
 		bgProcess.PID = cmd.Process.Pid
+		bgProcess.cmd = cmd
 		bgProcess.Mutex.Unlock()
 
-		// Use WaitGroup to wait for output capture goroutines
+		// Use WaitGroup to wait for output capture goroutines with timeout protection
 		var outputWg sync.WaitGroup
 		outputWg.Add(2)
 
-		// Start goroutines to capture output with proper buffering
+		// Channel to signal completion and prevent goroutine leaks
+		done := make(chan struct{})
+		defer close(done)
+
+		// Start goroutines to capture output with proper buffering and leak prevention
 		go func() {
 			defer outputWg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					m.logger.Error("Panic in stdout capture goroutine", fmt.Errorf("panic: %v", r))
+				}
+			}()
+
 			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				// Use the new method that applies output limiting
-				bgProcess.UpdateOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
-			}
-			// Handle any scanning errors (but EOF is normal)
-			if err := scanner.Err(); err != nil {
-				m.logger.Error("Error reading stdout from background process", err)
+			scanner.Split(bufio.ScanLines)
+
+			for {
+				select {
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				default:
+					if !scanner.Scan() {
+						return // EOF or error
+					}
+					// Use the new method that applies output limiting
+					bgProcess.UpdateOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
+				}
 			}
 		}()
 
 		go func() {
 			defer outputWg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					m.logger.Error("Panic in stderr capture goroutine", fmt.Errorf("panic: %v", r))
+				}
+			}()
+
 			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				// Use the new method that applies output limiting
-				bgProcess.UpdateErrorOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
-			}
-			// Handle any scanning errors (but EOF is normal)
-			if err := scanner.Err(); err != nil {
-				m.logger.Error("Error reading stderr from background process", err)
+			scanner.Split(bufio.ScanLines)
+
+			for {
+				select {
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				default:
+					if !scanner.Scan() {
+						return // EOF or error
+					}
+					// Use the new method that applies output limiting
+					bgProcess.UpdateErrorOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
+				}
 			}
 		}()
 
-		// Wait for command completion
+		// Wait for command completion with timeout protection
 		execErr := cmd.Wait()
 
-		// Wait for output capture goroutines to complete
-		outputWg.Wait()
+		// Wait for output capture goroutines to complete with timeout
+		outputDone := make(chan struct{})
+		go func() {
+			outputWg.Wait()
+			close(outputDone)
+		}()
+
+		select {
+		case <-outputDone:
+			// Output capture completed normally
+		case <-time.After(30 * time.Second):
+			// Force timeout for output capture
+			m.logger.Warn("Output capture timeout, forcing completion", map[string]interface{}{
+				"process_id": processID,
+				"command":    command,
+			})
+		}
 
 		endTime := time.Now()
 		duration := endTime.Sub(startTime)
@@ -1412,21 +1604,29 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 		// Store the command result in history
 		success := execErr == nil && exitCode == 0
 
-		// Store in database
+		// Store in database (check if database is still available)
 		if m.database != nil {
-			if storeErr := m.database.StoreCommand(
-				sessionID,
-				session.ProjectID,
-				command,
-				bgProcess.Output,
-				exitCode,
-				success,
-				startTime,
-				endTime,
-				duration,
-				session.WorkingDir,
-			); storeErr != nil {
-				m.logger.Error("Failed to store background command", storeErr)
+			// Check database health before using it
+			if dbHealthErr := m.database.HealthCheck(); dbHealthErr == nil {
+				if storeErr := m.database.StoreCommand(
+					sessionID,
+					session.ProjectID,
+					command,
+					bgProcess.Output,
+					exitCode,
+					success,
+					startTime,
+					endTime,
+					duration,
+					session.WorkingDir,
+				); storeErr != nil {
+					m.logger.Error("Failed to store background command", storeErr)
+				}
+			} else {
+				m.logger.Debug("Database not available for storing background command", map[string]interface{}{
+					"session_id": sessionID,
+					"error":      dbHealthErr.Error(),
+				})
 			}
 		}
 

@@ -312,8 +312,56 @@ func main() {
 		},
 	}, terminalTools.CheckBackgroundProcess)
 
+	// Register resource monitoring tools
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_resource_status",
+		Description: "Get comprehensive resource usage and monitoring status including memory, goroutines, and potential leak detection. Use this to monitor the health of the MCP server and identify resource consumption patterns.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"force_gc": {
+					Type:        "boolean",
+					Description: "Optional: Force garbage collection before retrieving metrics. Default: false.",
+				},
+			},
+		},
+	}, terminalTools.GetResourceStatus)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_resource_leaks",
+		Description: "Analyze current resource usage to detect potential memory or goroutine leaks. Provides detailed analysis, leak detection, and recommendations for addressing resource issues.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"threshold": {
+					Type:        "integer",
+					Description: "Optional: Custom threshold for leak detection. Default: 50 goroutines increase.",
+				},
+			},
+		},
+	}, terminalTools.CheckResourceLeaks)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "force_resource_cleanup",
+		Description: "Perform aggressive resource cleanup to address potential leaks. Includes garbage collection, session cleanup, and process termination. Use when resource leaks are detected.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"cleanup_type": {
+					Type:        "string",
+					Description: "Type of cleanup to perform: 'gc' (garbage collection), 'sessions', 'processes', or 'all'. Default: 'gc'.",
+				},
+				"confirm": {
+					Type:        "boolean",
+					Description: "Must be true to confirm cleanup and prevent accidental resource cleanup.",
+				},
+			},
+			Required: []string{"confirm"},
+		},
+	}, terminalTools.ForceCleanup)
+
 	appLogger.Info("Terminal MCP Server registered all tools successfully", map[string]interface{}{
-		"tools_count": 9,
+		"tools_count": 12,
 	})
 	appLogger.Info("Available tools:")
 	appLogger.Info("  - create_terminal_session: Create isolated terminal sessions for organized project work")
@@ -325,6 +373,9 @@ func main() {
 	appLogger.Info("  - search_terminal_history: Find and analyze previous commands across projects")
 	appLogger.Info("  - delete_session: Clean up sessions individually or by project")
 	appLogger.Info("  - check_background_process: Monitor specific background processes")
+	appLogger.Info("  - get_resource_status: Monitor server resource usage and health")
+	appLogger.Info("  - check_resource_leaks: Detect and analyze potential resource leaks")
+	appLogger.Info("  - force_resource_cleanup: Perform aggressive resource cleanup when needed")
 
 	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

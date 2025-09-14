@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -348,8 +349,13 @@ func (db *DB) CreateCommand(cmd *CommandRecord) error {
 
 // StoreCommand stores a command execution record
 func (db *DB) StoreCommand(sessionID, projectID, command, output string, exitCode int, success bool, startTime, endTime time.Time, duration time.Duration, workingDir string) error {
+	// Check if database connection is still valid
+	if err := db.HealthCheck(); err != nil {
+		return fmt.Errorf("database not available: %w", err)
+	}
+
 	cmd := &CommandRecord{
-		ID:         fmt.Sprintf("%s_%d", sessionID, time.Now().UnixNano()),
+		ID:         uuid.New().String(), // Use proper UUID to prevent collisions
 		SessionID:  sessionID,
 		ProjectID:  projectID,
 		Command:    command,

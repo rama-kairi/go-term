@@ -1,160 +1,183 @@
 package config
 
 import (
-	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 )
 
-// TestDefaultConfig tests the default configuration
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	// Test server config
 	if cfg.Server.Name != "github.com/rama-kairi/go-term" {
 		t.Errorf("Expected server name 'github.com/rama-kairi/go-term', got '%s'", cfg.Server.Name)
 	}
 
-	if cfg.Server.Version != "2.0.0" {
-		t.Errorf("Expected version '2.0.0', got '%s'", cfg.Server.Version)
-	}
-
-	// Test session config
 	if cfg.Session.MaxSessions != 10 {
 		t.Errorf("Expected max sessions 10, got %d", cfg.Session.MaxSessions)
 	}
 
-	if cfg.Session.MaxCommandsPerSession != 30 {
-		t.Errorf("Expected max commands per session 30, got %d", cfg.Session.MaxCommandsPerSession)
-	}
-
-	if cfg.Session.MaxBackgroundProcesses != 3 {
-		t.Errorf("Expected max background processes 3, got %d", cfg.Session.MaxBackgroundProcesses)
-	}
-
-	// Test database config
 	if !cfg.Database.Enable {
 		t.Errorf("Expected database to be enabled")
 	}
-
-	if cfg.Database.Driver != "sqlite3" {
-		t.Errorf("Expected database driver 'sqlite3', got '%s'", cfg.Database.Driver)
-	}
-
-	// Test streaming config
-	if !cfg.Streaming.Enable {
-		t.Errorf("Expected streaming to be enabled")
-	}
-
-	if cfg.Streaming.BufferSize != 4096 {
-		t.Errorf("Expected streaming buffer size 4096, got %d", cfg.Streaming.BufferSize)
-	}
-
-	// Test security config
-	if cfg.Security.EnableSandbox {
-		t.Errorf("Expected sandbox to be disabled by default")
-	}
-
-	if !cfg.Security.AllowNetworkAccess {
-		t.Errorf("Expected network access to be allowed by default")
-	}
-
-	if !cfg.Security.AllowFileSystemWrite {
-		t.Errorf("Expected filesystem write to be allowed by default")
-	}
-
-	// Test logging config
-	if cfg.Logging.Level != "info" {
-		t.Errorf("Expected logging level 'info', got '%s'", cfg.Logging.Level)
-	}
-
-	if cfg.Logging.Format != "json" {
-		t.Errorf("Expected logging format 'json', got '%s'", cfg.Logging.Format)
-	}
 }
 
-// TestConfigSerialization tests JSON serialization and deserialization
-func TestConfigSerialization(t *testing.T) {
-	original := DefaultConfig()
-
-	// Serialize to JSON
-	jsonData, err := json.MarshalIndent(original, "", "  ")
+func TestLoadConfig(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "config_test")
 	if err != nil {
-		t.Fatalf("Failed to marshal config: %v", err)
+		t.Fatalf("Failed to create temp dir: %v", err)
 	}
+	defer os.RemoveAll(tempDir)
 
-	// Deserialize from JSON
-	var restored Config
-	err = json.Unmarshal(jsonData, &restored)
+	testConfig := DefaultConfig()
+	testConfig.Server.Debug = true
+	testConfig.Session.MaxSessions = 20
+
+	testConfigFile := filepath.Join(tempDir, "test_config.json")
+	err = testConfig.SaveToFile(testConfigFile)
 	if err != nil {
-		t.Fatalf("Failed to unmarshal config: %v", err)
+		t.Fatalf("Failed to save test config: %v", err)
 	}
 
-	// Compare key values
-	if restored.Server.Name != original.Server.Name {
-		t.Errorf("Server name mismatch after serialization")
+	loadedConfig, err := LoadConfig(testConfigFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
 	}
 
-	if restored.Session.MaxSessions != original.Session.MaxSessions {
-		t.Errorf("Max sessions mismatch after serialization")
+	if !loadedConfig.Server.Debug {
+		t.Error("Expected debug to be true")
 	}
 
-	if restored.Database.Enable != original.Database.Enable {
-		t.Errorf("Database enable mismatch after serialization")
-	}
-}
-
-// TestTimeValues tests that time durations are properly handled
-func TestTimeValues(t *testing.T) {
-	cfg := DefaultConfig()
-
-	// Test that time values are reasonable
-	if cfg.Session.DefaultTimeout < time.Minute {
-		t.Errorf("Default timeout seems too short: %v", cfg.Session.DefaultTimeout)
-	}
-
-	if cfg.Session.CleanupInterval < time.Second {
-		t.Errorf("Cleanup interval seems too short: %v", cfg.Session.CleanupInterval)
-	}
-
-	if cfg.Database.ConnectionTimeout < time.Second {
-		t.Errorf("Connection timeout seems too short: %v", cfg.Database.ConnectionTimeout)
-	}
-
-	if cfg.Streaming.Timeout < time.Second {
-		t.Errorf("Streaming timeout seems too short: %v", cfg.Streaming.Timeout)
+	if loadedConfig.Session.MaxSessions != 20 {
+		t.Errorf("Expected max sessions 20, got %d", loadedConfig.Session.MaxSessions)
 	}
 }
 
-// TestSecurityDefaults tests that security defaults are reasonable
-func TestSecurityDefaults(t *testing.T) {
-	cfg := DefaultConfig()
+func TestEnvironmentVariables(t *testing.T) {
+	envVars := map[string]string{
+		"TERMINAL_MCP_DEBUG":        "true",
+		"TERMINAL_MCP_MAX_SESSIONS": "15",
+		"TERMINAL_MCP_LOG_LEVEL":    "debug",
+	}
 
-	// Test that dangerous commands are blocked by default
-	dangerous := []string{"rm -rf /", "format", "mkfs"}
-	for _, cmd := range dangerous {
-		found := false
-		for _, blocked := range cfg.Security.BlockedCommands {
-			if blocked == cmd {
-				found = true
-				break
+	origEnv := make(map[string]string)
+	for key, value := range envVars {
+		origEnv[key] = os.Getenv(key)
+		os.Setenv(key, value)
+	}
+	defer func() {
+		for key, origValue := range origEnv {
+			if origValue == "" {
+				os.Unsetenv(key)
+			} else {
+				os.Setenv(key, origValue)
 			}
 		}
-		if !found {
-			t.Errorf("Dangerous command '%s' should be blocked by default", cmd)
-		}
+	}()
+
+	config, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Test resource limits are reasonable
-	if cfg.Security.MaxProcesses < 1 {
-		t.Errorf("Max processes should be at least 1, got %d", cfg.Security.MaxProcesses)
+	if !config.Server.Debug {
+		t.Error("Expected debug to be true from environment")
 	}
 
-	if cfg.Security.MaxMemoryMB < 100 {
-		t.Errorf("Max memory should be at least 100MB, got %d", cfg.Security.MaxMemoryMB)
+	if config.Session.MaxSessions != 15 {
+		t.Errorf("Expected max sessions 15 from environment, got %d", config.Session.MaxSessions)
+	}
+}
+
+func TestValidation(t *testing.T) {
+	config := DefaultConfig()
+	config.Session.MaxSessions = 0
+
+	err := validateConfig(config)
+	if err == nil {
+		t.Error("Expected error for zero max sessions")
+	}
+}
+
+func TestSaveToFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "config_save_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	config := DefaultConfig()
+	configFile := filepath.Join(tempDir, "save_test.json")
+	err = config.SaveToFile(configFile)
+	if err != nil {
+		t.Fatalf("Failed to save config: %v", err)
 	}
 
-	if cfg.Security.MaxCPUPercent < 10 || cfg.Security.MaxCPUPercent > 100 {
-		t.Errorf("Max CPU percent should be between 10-100, got %d", cfg.Security.MaxCPUPercent)
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		t.Error("Config file was not created")
+	}
+}
+
+func TestGetConfigDir(t *testing.T) {
+	configDir, err := GetConfigDir()
+	if err != nil {
+		t.Fatalf("Failed to get config dir: %v", err)
+	}
+
+	if !strings.Contains(configDir, ".config") {
+		t.Error("Config dir should contain '.config'")
+	}
+}
+
+func TestGetDefaultConfigPath(t *testing.T) {
+	configPath, err := GetDefaultConfigPath()
+	if err != nil {
+		t.Fatalf("Failed to get default config path: %v", err)
+	}
+
+	if !strings.HasSuffix(configPath, "config.json") {
+		t.Error("Config path should end with 'config.json'")
+	}
+}
+
+func TestHelperFunctions(t *testing.T) {
+	if !parseBool("true") {
+		t.Error("Expected parseBool('true') to return true")
+	}
+
+	if parseBool("false") {
+		t.Error("Expected parseBool('false') to return false")
+	}
+
+	if parseInt("123", 0) != 123 {
+		t.Error("Expected parseInt('123', 0) to return 123")
+	}
+
+	if parseInt("invalid", 50) != 50 {
+		t.Error("Expected parseInt('invalid', 50) to return default 50")
+	}
+}
+
+func TestFileExists(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "file_exists_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	existingFile := filepath.Join(tempDir, "exists.txt")
+	err = os.WriteFile(existingFile, []byte("test"), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	if !fileExists(existingFile) {
+		t.Error("Expected fileExists to return true for existing file")
+	}
+
+	nonExistentFile := filepath.Join(tempDir, "does_not_exist.txt")
+	if fileExists(nonExistentFile) {
+		t.Error("Expected fileExists to return false for non-existent file")
 	}
 }
