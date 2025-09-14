@@ -90,13 +90,13 @@ func main() {
 	// Register create terminal session tool with enhanced features
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "create_terminal_session",
-		Description: "Create a new terminal session for executing commands. Sessions isolate work by project and maintain persistent environment state. Use this to start organized terminal work within projects - project IDs are automatically generated from the current directory. Each session tracks command history and maintains independent working directories.",
+		Description: "Create isolated terminal sessions for executing commands with persistent environment state. Each session maintains its own working directory, command history, and can run up to 3 background processes independently. Project IDs automatically organize sessions by directory. Essential for organized development workflow and resource management.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"name": {
 					Type:        "string",
-					Description: "Descriptive name for the terminal session (e.g., 'main-dev', 'testing', 'build-process').",
+					Description: "Descriptive name for the terminal session (e.g., 'main-dev', 'testing', 'build-process'). 3-100 characters, alphanumeric with underscores and hyphens.",
 				},
 				"project_id": {
 					Type:        "string",
@@ -114,7 +114,7 @@ func main() {
 	// Register list terminal sessions tool with enhanced information
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_terminal_sessions",
-		Description: "List all active terminal sessions with status information, command statistics, and project grouping. Use this to see which sessions are available for running commands, check session health, and avoid conflicts with busy terminals running background processes.",
+		Description: "List all active terminal sessions with comprehensive status information including command statistics, background process counts, and project grouping. Essential for session management - use this to find available sessions for commands, check which sessions have running background processes, and monitor resource usage across projects.",
 		InputSchema: &jsonschema.Schema{
 			Type:       "object",
 			Properties: map[string]*jsonschema.Schema{},
@@ -124,7 +124,7 @@ func main() {
 	// Register run command tool for foreground commands only
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_command",
-		Description: "Execute foreground commands in terminal sessions with immediate output. This tool only runs blocking/foreground commands that complete and return output. For long-running processes like development servers, use run_background_process instead. Includes intelligent package manager detection and security validation.",
+		Description: "Execute foreground commands in terminal sessions with immediate output. This tool waits for command completion and returns output. Use for: npm install, pip install, git commands, build tasks, tests, file operations, single-execution commands. DO NOT use for: dev servers (npm start, python manage.py runserver), file watchers (webpack --watch), or any long-running processes that don't exit automatically - use run_background_process instead. Includes intelligent package manager detection and security validation.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -134,7 +134,7 @@ func main() {
 				},
 				"command": {
 					Type:        "string",
-					Description: "Command to execute in foreground. This tool waits for command completion and returns output. Use run_background_process for long-running commands.",
+					Description: "Command to execute in foreground that will complete and exit. Examples: 'npm install', 'git commit -m \"message\"', 'go build', 'pytest', 'ls -la'. This tool blocks until command finishes.",
 				},
 			},
 			Required: []string{"session_id", "command"},
@@ -144,7 +144,7 @@ func main() {
 	// Register run background process tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_background_process",
-		Description: "Start long-running processes in the background without blocking. Use this for development servers, build watchers, and other processes that need to run continuously. No command validation is performed - the agent decides what to run. Maximum 3 background processes per session.",
+		Description: "Start long-running processes in the background without blocking. Use ONLY for processes that run continuously and don't exit automatically: development servers (npm start, python manage.py runserver, go run main.go), file watchers (webpack --watch, npm run dev), background services, or monitoring processes. This tool returns immediately with a process ID for tracking. Maximum 3 background processes per session. Use run_command for commands that complete and exit (builds, installs, tests).",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -154,7 +154,7 @@ func main() {
 				},
 				"command": {
 					Type:        "string",
-					Description: "Command to execute as a background process. No validation is performed.",
+					Description: "Long-running command to execute in background. Examples: 'npm start', 'python manage.py runserver', 'webpack --watch --mode development'. Command starts immediately and runs until manually terminated.",
 				},
 			},
 			Required: []string{"session_id", "command"},
@@ -164,7 +164,7 @@ func main() {
 	// Register list background processes tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_background_processes",
-		Description: "List all running background processes across sessions and projects with comprehensive status information. Use this to monitor which background processes are active, check their status, and avoid resource conflicts.",
+		Description: "List all running background processes across sessions and projects with comprehensive status information. Essential for monitoring active development servers, build watchers, and long-running tasks. Shows process IDs, running status, resource usage, and allows filtering by session or project. Use to identify processes that need termination or monitoring.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -183,21 +183,21 @@ func main() {
 	// Register terminate background process tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "terminate_background_process",
-		Description: "Stop and remove specific background processes by their process ID. Use this to clean up background processes that are no longer needed or are consuming too many resources.",
+		Description: "Stop and remove specific background processes by their process ID. Essential for resource management - use to terminate dev servers, build watchers, or stuck processes. Supports graceful termination (SIGTERM) or force kill (SIGKILL). Always terminate background processes when switching tasks or completing development work to free resources.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "Session ID containing the background process to terminate.",
+					Description: "Session ID containing the background process to terminate. Get from list_background_processes.",
 				},
 				"process_id": {
 					Type:        "string",
-					Description: "Process ID of the background process to terminate.",
+					Description: "Process ID of the background process to terminate. Get from list_background_processes.",
 				},
 				"force": {
 					Type:        "boolean",
-					Description: "Whether to force kill the process (SIGKILL) instead of graceful termination (SIGTERM). Default: false.",
+					Description: "Whether to force kill the process (SIGKILL) instead of graceful termination (SIGTERM). Use true for stuck processes. Default: false.",
 				},
 			},
 			Required: []string{"session_id", "process_id"},
@@ -207,62 +207,62 @@ func main() {
 	// Register search history tool for command discovery
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_terminal_history",
-		Description: "Search command history across all sessions and projects to find previously executed commands, analyze outputs, and troubleshoot issues. Supports filtering by project, session, command text, output content, success status, and time ranges. Essential for debugging and finding patterns in command execution.",
+		Description: "Search command history across all sessions and projects to find previously executed commands, analyze outputs, and troubleshoot issues. Essential for debugging, finding command patterns, and learning from past executions. Supports comprehensive filtering and time-based analysis.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "Filter by session ID. Leave empty to search all sessions.",
+					Description: "Filter by session ID. Leave empty to search all sessions. Get session IDs from list_terminal_sessions.",
 				},
 				"project_id": {
 					Type:        "string",
-					Description: "Filter by project ID. Leave empty to search all projects.",
+					Description: "Filter by project ID. Leave empty to search all projects. Useful for project-specific command analysis.",
 				},
 				"command": {
 					Type:        "string",
-					Description: "Search for commands containing this text (case-insensitive).",
+					Description: "Search for commands containing this text (case-insensitive). Example: 'npm' to find all npm commands.",
 				},
 				"output": {
 					Type:        "string",
-					Description: "Search for commands with output containing this text (case-insensitive).",
+					Description: "Search for commands with output containing this text (case-insensitive). Useful for finding errors or specific output patterns.",
 				},
 				"success": {
 					Type:        "boolean",
-					Description: "Filter by success status: true for successful, false for failed commands.",
+					Description: "Filter by command success status: true for successful commands, false for failed commands. Useful for debugging.",
 				},
 				"start_time": {
 					Type:        "string",
-					Description: "Find commands after this time (ISO 8601: 2006-01-02T15:04:05Z).",
+					Description: "Find commands executed after this time (ISO 8601 format: 2006-01-02T15:04:05Z). Useful for time-based analysis.",
 				},
 				"end_time": {
 					Type:        "string",
-					Description: "Find commands before this time (ISO 8601: 2006-01-02T15:04:05Z).",
+					Description: "Find commands executed before this time (ISO 8601 format: 2006-01-02T15:04:05Z). Combine with start_time for time ranges.",
 				},
 				"working_dir": {
 					Type:        "string",
-					Description: "Filter by working directory (partial match).",
+					Description: "Filter by working directory (partial match). Useful for finding commands executed in specific paths.",
 				},
 				"tags": {
 					Type:        "array",
 					Items:       &jsonschema.Schema{Type: "string"},
-					Description: "Filter by tags (commands must have all specified tags).",
+					Description: "Filter by tags (commands must have all specified tags). Used for categorizing and filtering commands.",
 				},
 				"limit": {
 					Type:        "integer",
-					Description: "Maximum results to return (default: 100, max: 1000).",
+					Description: "Maximum results to return (default: 100, max: 1000). Use smaller values for focused results.",
 				},
 				"sort_by": {
 					Type:        "string",
-					Description: "Sort by: 'time' (default), 'duration', or 'command'.",
+					Description: "Sort results by: 'time' (default), 'duration', or 'command'. Choose based on analysis needs.",
 				},
 				"sort_desc": {
 					Type:        "boolean",
-					Description: "Sort in descending order (default: true).",
+					Description: "Sort in descending order (default: true). Use false for chronological order.",
 				},
 				"include_output": {
 					Type:        "boolean",
-					Description: "Include command output in results (default: false).",
+					Description: "Include full command output in results (default: false). Warning: may return large amounts of data.",
 				},
 			},
 		},
@@ -271,21 +271,21 @@ func main() {
 	// Register delete session tool for session management
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delete_session",
-		Description: "Delete terminal sessions individually or by project with confirmation requirement. Use this to clean up completed work and free resources. Requires explicit confirmation to prevent accidental deletion of active sessions.",
+		Description: "Delete terminal sessions individually or by project with confirmation requirement. Essential for resource cleanup - removes session history, terminates background processes, and frees system resources. Use after completing work to maintain clean development environment. Requires explicit confirmation to prevent accidental deletion.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "Session ID to delete. Leave empty to delete by project_id instead.",
+					Description: "Session ID to delete. Leave empty to delete by project_id instead. Get session IDs from list_terminal_sessions.",
 				},
 				"project_id": {
 					Type:        "string",
-					Description: "Delete all sessions for this project. Leave empty to delete by session_id instead.",
+					Description: "Delete all sessions for this project. Leave empty to delete by session_id instead. Useful for cleaning up entire project workspaces.",
 				},
 				"confirm": {
 					Type:        "boolean",
-					Description: "Must be true to confirm deletion and prevent accidents.",
+					Description: "Must be true to confirm deletion and prevent accidents. Required safety measure.",
 				},
 			},
 			Required: []string{"confirm"},
@@ -295,17 +295,17 @@ func main() {
 	// Register background process monitoring tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "check_background_process",
-		Description: "Monitor specific background processes to check their status, output, and health. Use this to track development servers, build processes, and other long-running tasks started with run_background_process.",
+		Description: "Monitor specific background processes to check their status, output, and health. Use to track development servers, build processes, and other long-running tasks started with run_background_process. Returns real-time status, output logs, error messages, and resource usage. Essential for debugging background processes and monitoring their health.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"session_id": {
 					Type:        "string",
-					Description: "Session ID where the background process is running.",
+					Description: "Session ID where the background process is running. Get from list_terminal_sessions.",
 				},
 				"process_id": {
 					Type:        "string",
-					Description: "Optional: Specific process ID. If not provided, checks the latest background process.",
+					Description: "Optional: Specific process ID to check. If not provided, checks the latest background process in the session. Get process IDs from list_background_processes.",
 				},
 			},
 			Required: []string{"session_id"},
@@ -315,13 +315,13 @@ func main() {
 	// Register resource monitoring tools
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_resource_status",
-		Description: "Get comprehensive resource usage and monitoring status including memory, goroutines, and potential leak detection. Use this to monitor the health of the MCP server and identify resource consumption patterns.",
+		Description: "Get comprehensive resource usage and monitoring status including memory consumption, goroutine counts, and potential leak detection. Essential for monitoring MCP server health, tracking resource usage patterns, and identifying performance issues. Use regularly during heavy workloads or when experiencing performance degradation.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"force_gc": {
 					Type:        "boolean",
-					Description: "Optional: Force garbage collection before retrieving metrics. Default: false.",
+					Description: "Force garbage collection before retrieving metrics to get accurate memory usage. Useful for detecting memory leaks. Default: false.",
 				},
 			},
 		},
@@ -329,13 +329,13 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "check_resource_leaks",
-		Description: "Analyze current resource usage to detect potential memory or goroutine leaks. Provides detailed analysis, leak detection, and recommendations for addressing resource issues.",
+		Description: "Analyze current resource usage to detect potential memory or goroutine leaks with detailed diagnostic analysis. Provides leak detection, resource growth analysis, and specific recommendations for addressing resource issues. Use when experiencing performance problems or after long-running operations.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"threshold": {
 					Type:        "integer",
-					Description: "Optional: Custom threshold for leak detection. Default: 50 goroutines increase.",
+					Description: "Custom threshold for goroutine leak detection (number of goroutines increase to consider suspicious). Default: 50 goroutines.",
 				},
 			},
 		},
@@ -343,17 +343,17 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "force_resource_cleanup",
-		Description: "Perform aggressive resource cleanup to address potential leaks. Includes garbage collection, session cleanup, and process termination. Use when resource leaks are detected.",
+		Description: "Perform aggressive resource cleanup to address potential leaks and free system resources. Includes garbage collection, inactive session cleanup, and background process termination. Use when resource leaks are detected or system performance is degraded. Requires confirmation to prevent accidental cleanup.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
 				"cleanup_type": {
 					Type:        "string",
-					Description: "Type of cleanup to perform: 'gc' (garbage collection), 'sessions', 'processes', or 'all'. Default: 'gc'.",
+					Description: "Type of cleanup: 'gc' (garbage collection only), 'sessions' (cleanup inactive sessions), 'processes' (terminate background processes), or 'all' (comprehensive cleanup). Default: 'gc'.",
 				},
 				"confirm": {
 					Type:        "boolean",
-					Description: "Must be true to confirm cleanup and prevent accidental resource cleanup.",
+					Description: "Must be true to confirm cleanup and prevent accidental resource cleanup. Required safety measure.",
 				},
 			},
 			Required: []string{"confirm"},
