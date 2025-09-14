@@ -1476,3 +1476,79 @@ func (m *Manager) GetBackgroundProcess(sessionID, processID string) (*Background
 
 	return proc, nil
 }
+
+// GetAllBackgroundProcesses returns all background processes across all sessions with optional filtering
+func (m *Manager) GetAllBackgroundProcesses(sessionID, projectID string) (map[string]map[string]*BackgroundProcess, error) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	result := make(map[string]map[string]*BackgroundProcess)
+
+	for _, session := range m.sessions {
+		// Apply session filter if specified
+		if sessionID != "" && session.ID != sessionID {
+			continue
+		}
+
+		// Apply project filter if specified
+		if projectID != "" && session.ProjectID != projectID {
+			continue
+		}
+
+		session.mutex.RLock()
+		if len(session.BackgroundProcesses) > 0 {
+			sessionProcesses := make(map[string]*BackgroundProcess)
+			for procID, proc := range session.BackgroundProcesses {
+				sessionProcesses[procID] = proc
+			}
+			result[session.ID] = sessionProcesses
+		}
+		session.mutex.RUnlock()
+	}
+
+	return result, nil
+}
+
+// TerminateBackgroundProcess terminates a specific background process
+func (m *Manager) TerminateBackgroundProcess(sessionID, processID string, force bool) error {
+	session, err := m.GetSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("session not found: %v", err)
+	}
+
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	bgProcess, exists := session.BackgroundProcesses[processID]
+	if !exists {
+		return fmt.Errorf("background process %s not found in session %s", processID, sessionID)
+	}
+
+	// Terminate the process if it's running
+	if bgProcess.IsRunning && bgProcess.cmd != nil && bgProcess.cmd.Process != nil {
+		var killErr error
+		if force {
+			killErr = bgProcess.cmd.Process.Kill()
+		} else {
+			killErr = bgProcess.cmd.Process.Signal(os.Interrupt)
+			if killErr != nil {
+				// Fallback to kill if interrupt fails
+				killErr = bgProcess.cmd.Process.Kill()
+			}
+		}
+
+		if killErr != nil {
+			return fmt.Errorf("failed to terminate process: %v", killErr)
+		}
+
+		// Update process status
+		bgProcess.Mutex.Lock()
+		bgProcess.IsRunning = false
+		bgProcess.Mutex.Unlock()
+	}
+
+	// Remove from session background processes
+	delete(session.BackgroundProcesses, processID)
+
+	return nil
+}

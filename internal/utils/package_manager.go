@@ -243,6 +243,7 @@ func (d *PackageManagerDetector) GetRunCommand(workingDir, script string) string
 func (d *PackageManagerDetector) isExecutableAvailable(name string) bool {
 	// Simple check - in a real implementation, you'd use exec.LookPath
 	// For now, we'll assume if the config/lock file exists, the tool is available
+	_ = name // Suppress unused parameter warning
 	return true
 }
 

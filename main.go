@@ -121,10 +121,10 @@ func main() {
 		},
 	}, terminalTools.ListSessions)
 
-	// Register run command tool with enhanced tracking
+	// Register run command tool for foreground commands only
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "run_command",
-		Description: "Execute commands in terminal sessions with automatic background detection for long-running processes. Automatically detects and runs development servers, build watchers, and other long-running processes in background mode to prevent blocking. Regular commands run in foreground with immediate output. Includes intelligent package manager detection and security validation.",
+		Description: "Execute foreground commands in terminal sessions with immediate output. This tool only runs blocking/foreground commands that complete and return output. For long-running processes like development servers, use run_background_process instead. Includes intelligent package manager detection and security validation.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -134,20 +134,75 @@ func main() {
 				},
 				"command": {
 					Type:        "string",
-					Description: "Command to execute. Development servers and long-running processes are automatically detected and run in background mode.",
-				},
-				"is_background": {
-					Type:        "boolean",
-					Description: "Optional: Force background (true) or foreground (false) execution. Leave empty for automatic detection.",
-				},
-				"timeout_test": {
-					Type:        "boolean",
-					Description: "Optional: Test command responsiveness with 10-second timeout before full execution.",
+					Description: "Command to execute in foreground. This tool waits for command completion and returns output. Use run_background_process for long-running commands.",
 				},
 			},
 			Required: []string{"session_id", "command"},
 		},
 	}, terminalTools.RunCommand)
+
+	// Register run background process tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "run_background_process",
+		Description: "Start long-running processes in the background without blocking. Use this for development servers, build watchers, and other processes that need to run continuously. No command validation is performed - the agent decides what to run. Maximum 3 background processes per session.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Session ID to run the background process in. Use list_terminal_sessions to see available sessions.",
+				},
+				"command": {
+					Type:        "string",
+					Description: "Command to execute as a background process. No validation is performed.",
+				},
+			},
+			Required: []string{"session_id", "command"},
+		},
+	}, terminalTools.RunBackgroundProcess)
+
+	// Register list background processes tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_background_processes",
+		Description: "List all running background processes across sessions and projects with comprehensive status information. Use this to monitor which background processes are active, check their status, and avoid resource conflicts.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Optional: Filter by specific session ID. Leave empty to list all background processes.",
+				},
+				"project_id": {
+					Type:        "string",
+					Description: "Optional: Filter by specific project ID. Leave empty to list all background processes.",
+				},
+			},
+		},
+	}, terminalTools.ListBackgroundProcesses)
+
+	// Register terminate background process tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "terminate_background_process",
+		Description: "Stop and remove specific background processes by their process ID. Use this to clean up background processes that are no longer needed or are consuming too many resources.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Session ID containing the background process to terminate.",
+				},
+				"process_id": {
+					Type:        "string",
+					Description: "Process ID of the background process to terminate.",
+				},
+				"force": {
+					Type:        "boolean",
+					Description: "Whether to force kill the process (SIGKILL) instead of graceful termination (SIGTERM). Default: false.",
+				},
+			},
+			Required: []string{"session_id", "process_id"},
+		},
+	}, terminalTools.TerminateBackgroundProcess)
 
 	// Register search history tool for command discovery
 	mcp.AddTool(server, &mcp.Tool{
@@ -240,7 +295,7 @@ func main() {
 	// Register background process monitoring tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "check_background_process",
-		Description: "Monitor background processes started by run_command to check their status, output, and health. Essential for tracking development servers, build processes, and other long-running tasks without blocking the main workflow.",
+		Description: "Monitor specific background processes to check their status, output, and health. Use this to track development servers, build processes, and other long-running tasks started with run_background_process.",
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
@@ -258,15 +313,18 @@ func main() {
 	}, terminalTools.CheckBackgroundProcess)
 
 	appLogger.Info("Terminal MCP Server registered all tools successfully", map[string]interface{}{
-		"tools_count": 6,
+		"tools_count": 9,
 	})
 	appLogger.Info("Available tools:")
 	appLogger.Info("  - create_terminal_session: Create isolated terminal sessions for organized project work")
 	appLogger.Info("  - list_terminal_sessions: View all sessions with status and statistics")
-	appLogger.Info("  - run_command: Execute commands with automatic background detection")
+	appLogger.Info("  - run_command: Execute foreground commands with immediate output")
+	appLogger.Info("  - run_background_process: Start long-running processes in background")
+	appLogger.Info("  - list_background_processes: List all running background processes")
+	appLogger.Info("  - terminate_background_process: Stop specific background processes")
 	appLogger.Info("  - search_terminal_history: Find and analyze previous commands across projects")
 	appLogger.Info("  - delete_session: Clean up sessions individually or by project")
-	appLogger.Info("  - check_background_process: Monitor long-running background processes")
+	appLogger.Info("  - check_background_process: Monitor specific background processes")
 
 	// Set up graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

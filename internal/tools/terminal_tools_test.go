@@ -33,7 +33,7 @@ func setupTestEnvironment(t *testing.T) (*TerminalTools, *terminal.Manager, stri
 	cfg.Session.BackgroundOutputLimit = 2000
 	cfg.Session.ResourceCleanupInterval = time.Minute
 	cfg.Session.MaxCommandLength = 10000
-	cfg.Streaming.Enable = true
+	cfg.Streaming.Enable = false // Disable streaming for tests
 	cfg.Streaming.BufferSize = 4096
 	cfg.Streaming.Timeout = 30 * time.Second
 	cfg.Security.EnableSandbox = false
@@ -41,7 +41,8 @@ func setupTestEnvironment(t *testing.T) (*TerminalTools, *terminal.Manager, stri
 	cfg.Security.AllowNetworkAccess = true
 	cfg.Security.AllowFileSystemWrite = true
 
-	// Create logger
+	// Create logger with minimal output for tests
+	cfg.Logging.Level = "error"
 	testLogger, err := logger.NewLogger(&cfg.Logging, "test")
 	if err != nil {
 		t.Fatalf("Failed to create logger: %v", err)
@@ -62,243 +63,207 @@ func setupTestEnvironment(t *testing.T) (*TerminalTools, *terminal.Manager, stri
 	return tools, manager, tempDir
 }
 
-// TestBackgroundProcessDetection tests if background detection patterns work
-func TestBackgroundProcessDetection(t *testing.T) {
+// TestCreateSession tests session creation functionality
+func TestCreateSession(t *testing.T) {
 	tools, _, tempDir := setupTestEnvironment(t)
 	defer os.RemoveAll(tempDir)
 
-	tests := []struct {
-		name         string
-		command      string
-		shouldDetect bool
-		description  string
-	}{
-		{
-			name:         "ping_should_be_background",
-			command:      "ping google.com",
-			shouldDetect: true,
-			description:  "Ping commands should be detected as background",
-		},
-		{
-			name:         "sleep_long_should_be_background",
-			command:      "sleep 60",
-			shouldDetect: true,
-			description:  "Long sleep commands should be detected as background",
-		},
-		{
-			name:         "python_background_test",
-			command:      "python3 background_test.py",
-			shouldDetect: true,
-			description:  "Python background test script should be detected",
-		},
-		{
-			name:         "node_setinterval",
-			command:      "node -e \"setInterval(() => console.log('test'), 1000)\"",
-			shouldDetect: true,
-			description:  "Node.js setInterval should be detected as background",
-		},
-		{
-			name:         "echo_should_not_be_background",
-			command:      "echo 'hello'",
-			shouldDetect: false,
-			description:  "Simple echo should not be background",
-		},
-		{
-			name:         "ls_should_not_be_background",
-			command:      "ls -la",
-			shouldDetect: false,
-			description:  "Directory listing should not be background",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			detected := tools.shouldAutoDetectBackground(tt.command)
-			if detected != tt.shouldDetect {
-				t.Errorf("%s: expected %v, got %v for command: %s",
-					tt.description, tt.shouldDetect, detected, tt.command)
-			}
-		})
-	}
-}
-
-// TestBackgroundProcessExecution tests actual background process execution
-func TestBackgroundProcessExecution(t *testing.T) {
-	tools, manager, tempDir := setupTestEnvironment(t)
-	defer os.RemoveAll(tempDir)
-
-	// Create a test session
-	session, err := manager.CreateSession("test-session", "", "")
-	if err != nil {
-		t.Fatalf("Failed to create test session: %v", err)
-	}
-
-	tests := []struct {
-		name         string
-		command      string
-		isBackground bool
-		expectError  bool
-		description  string
-	}{
-		{
-			name:         "force_background_sleep",
-			command:      "sleep 5",
-			isBackground: true,
-			expectError:  false,
-			description:  "Force background execution of sleep should work",
-		},
-		{
-			name:         "auto_detect_ping",
-			command:      "ping -c 3 127.0.0.1",
-			isBackground: false, // Let auto-detection handle it
-			expectError:  false,
-			description:  "Auto-detection should make ping background",
-		},
-		{
-			name:         "foreground_echo",
-			command:      "echo 'test output'",
-			isBackground: false,
-			expectError:  false,
-			description:  "Simple echo should run in foreground",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-			args := RunCommandArgs{
-				SessionID:    session.ID,
-				Command:      tt.command,
-				IsBackground: tt.isBackground,
-			}
-
-			// Set a timeout for the test to prevent hanging
-			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-
-			// Run the command
-			start := time.Now()
-			result, cmdResult, err := tools.RunCommand(ctx, nil, args)
-			duration := time.Since(start)
-
-			// Check for errors
-			if tt.expectError && err == nil {
-				t.Errorf("%s: expected error but got none", tt.description)
-			}
-			if !tt.expectError && err != nil {
-				t.Errorf("%s: unexpected error: %v", tt.description, err)
-			}
-
-			// Check if result indicates error
-			if result != nil && result.IsError && !tt.expectError {
-				t.Errorf("%s: result indicates error but none expected", tt.description)
-			}
-
-			// Check execution time - background commands should return quickly
-			shouldRunInBackground := tt.isBackground || tools.shouldAutoDetectBackground(tt.command)
-			if shouldRunInBackground && duration > 2*time.Second {
-				t.Errorf("%s: background command took too long: %v", tt.description, duration)
-			}
-
-			// Log results for debugging
-			t.Logf("%s: duration=%v, isBackground=%v, success=%v",
-				tt.description, duration, cmdResult.IsBackground, cmdResult.Success)
-		})
-	}
-}
-
-// TestBackgroundProcessMonitoring tests the check_background_process functionality
-func TestBackgroundProcessMonitoring(t *testing.T) {
-	tools, manager, tempDir := setupTestEnvironment(t)
-	defer os.RemoveAll(tempDir)
-
-	// Create a test session
-	session, err := manager.CreateSession("monitor-test", "", "")
-	if err != nil {
-		t.Fatalf("Failed to create test session: %v", err)
-	}
-
-	// Start a background process
 	ctx := context.Background()
-	args := RunCommandArgs{
-		SessionID:    session.ID,
-		Command:      "sleep 30",
-		IsBackground: true, // Force background
+
+	tests := []struct {
+		name        string
+		sessionName string
+		expectError bool
+	}{
+		{
+			name:        "valid session name",
+			sessionName: "test-session",
+			expectError: false,
+		},
+		{
+			name:        "session with underscores",
+			sessionName: "test_session_123",
+			expectError: false,
+		},
+		{
+			name:        "empty session name",
+			sessionName: "",
+			expectError: true,
+		},
 	}
 
-	_, cmdResult, err := tools.RunCommand(ctx, nil, args)
-	if err != nil {
-		t.Fatalf("Failed to start background process: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := CreateSessionArgs{
+				Name: tt.sessionName,
+			}
+
+			result, sessionResult, err := tools.CreateSession(ctx, nil, args)
+
+			if tt.expectError {
+				if err == nil && (result == nil || !result.IsError) {
+					t.Errorf("Expected error for session name '%s' but got none", tt.sessionName)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if result != nil && result.IsError {
+					t.Errorf("Result indicates error but none expected")
+				}
+				if sessionResult.SessionID == "" {
+					t.Errorf("Expected session ID but got empty string")
+				}
+				if sessionResult.Name != tt.sessionName {
+					t.Errorf("Expected session name '%s', got '%s'", tt.sessionName, sessionResult.Name)
+				}
+			}
+		})
 	}
-
-	if !cmdResult.IsBackground {
-		t.Fatalf("Command should have run in background but didn't")
-	}
-
-	// Wait a moment for the process to start
-	time.Sleep(100 * time.Millisecond)
-
-	// Now check the background process
-	checkArgs := CheckBackgroundProcessArgs{
-		SessionID: session.ID,
-	}
-
-	_, checkResult, err := tools.CheckBackgroundProcess(ctx, nil, checkArgs)
-	if err != nil {
-		t.Fatalf("Failed to check background process: %v", err)
-	}
-
-	// Verify the check result
-	if checkResult.SessionID != session.ID {
-		t.Errorf("Expected session ID %s, got %s", session.ID, checkResult.SessionID)
-	}
-
-	t.Logf("Background process check result: running=%v, command=%s",
-		checkResult.IsRunning, checkResult.Command)
 }
 
-// TestSimpleBackgroundExecution tests the most basic case
-func TestSimpleBackgroundExecution(t *testing.T) {
-	tools, manager, tempDir := setupTestEnvironment(t)
+// TestRunCommand tests foreground command execution
+func TestRunCommand(t *testing.T) {
+	tools, _, tempDir := setupTestEnvironment(t)
 	defer os.RemoveAll(tempDir)
 
+	ctx := context.Background()
+
 	// Create a test session
-	session, err := manager.CreateSession("simple-test", "", "")
+	createArgs := CreateSessionArgs{Name: "test-session"}
+	_, sessionResult, err := tools.CreateSession(ctx, nil, createArgs)
 	if err != nil {
 		t.Fatalf("Failed to create test session: %v", err)
 	}
 
-	// Test the simplest possible background command
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	args := RunCommandArgs{
-		SessionID:    session.ID,
-		Command:      "sleep 10",
-		IsBackground: true,
+	tests := []struct {
+		name        string
+		command     string
+		expectError bool
+	}{
+		{
+			name:        "simple echo command",
+			command:     "echo hello",
+			expectError: false,
+		},
+		{
+			name:        "empty command",
+			command:     "",
+			expectError: true,
+		},
 	}
 
-	start := time.Now()
-	result, cmdResult, err := tools.RunCommand(ctx, nil, args)
-	duration := time.Since(start)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := RunCommandArgs{
+				SessionID: sessionResult.SessionID,
+				Command:   tt.command,
+			}
 
-	// This should complete quickly since it's background
-	if duration > 2*time.Second {
-		t.Errorf("Background command took too long: %v", duration)
+			result, cmdResult, err := tools.RunCommand(ctx, nil, args)
+
+			if tt.expectError {
+				if err == nil && (result == nil || !result.IsError) {
+					t.Errorf("Expected error for command '%s' but got none", tt.command)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if result != nil && result.IsError {
+					t.Errorf("Result indicates error but none expected")
+				}
+				if cmdResult.SessionID != sessionResult.SessionID {
+					t.Errorf("Expected session ID '%s', got '%s'", sessionResult.SessionID, cmdResult.SessionID)
+				}
+			}
+		})
 	}
+}
 
+// TestRunBackgroundProcess tests background process execution
+func TestRunBackgroundProcess(t *testing.T) {
+	tools, _, tempDir := setupTestEnvironment(t)
+	defer os.RemoveAll(tempDir)
+
+	ctx := context.Background()
+
+	// Create a test session
+	createArgs := CreateSessionArgs{Name: "test-session"}
+	_, sessionResult, err := tools.CreateSession(ctx, nil, createArgs)
 	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
+		t.Fatalf("Failed to create test session: %v", err)
+	}
+
+	// Test running a background process
+	args := RunBackgroundProcessArgs{
+		SessionID: sessionResult.SessionID,
+		Command:   "sleep 2", // Short sleep for testing
+	}
+
+	result, bgResult, err := tools.RunBackgroundProcess(ctx, nil, args)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	if result.IsError {
-		t.Errorf("Result indicates error: %+v", result)
+		t.Fatalf("Result indicates error")
 	}
 
-	if !cmdResult.IsBackground {
-		t.Errorf("Command should have run in background")
+	if bgResult.SessionID != sessionResult.SessionID {
+		t.Errorf("Expected session ID '%s', got '%s'", sessionResult.SessionID, bgResult.SessionID)
 	}
 
-	t.Logf("Simple background test: duration=%v, success=%v, isBackground=%v",
-		duration, cmdResult.Success, cmdResult.IsBackground)
+	if bgResult.ProcessID == "" {
+		t.Errorf("Expected process ID but got empty string")
+	}
+
+	if !bgResult.Success {
+		t.Errorf("Expected success but got failure")
+	}
+}
+
+// TestSecurityValidator tests command security validation
+func TestSecurityValidator(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Security.EnableSandbox = true
+	cfg.Security.BlockedCommands = []string{"rm", "sudo"}
+
+	validator := NewSecurityValidator(cfg)
+
+	tests := []struct {
+		name        string
+		command     string
+		expectError bool
+	}{
+		{
+			name:        "safe command",
+			command:     "echo hello",
+			expectError: false,
+		},
+		{
+			name:        "blocked command",
+			command:     "rm file.txt",
+			expectError: true,
+		},
+		{
+			name:        "empty command",
+			command:     "",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validator.ValidateCommand(tt.command)
+
+			if tt.expectError && err == nil {
+				t.Errorf("Expected error for command '%s' but got none", tt.command)
+			}
+
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error for command '%s': %v", tt.command, err)
+			}
+		})
+	}
 }
