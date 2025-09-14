@@ -16,10 +16,12 @@ func (t *TerminalTools) CreateSession(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	// Create session with simplified API - let session manager handle workspace detection and project ID generation
-	session, err := t.manager.CreateSession(args.Name, "", "")
+	session, err := t.manager.CreateSession(args.Name, args.ProjectID, args.WorkingDir)
 	if err != nil {
 		t.logger.Error("Failed to create session", err, map[string]interface{}{
 			"session_name": args.Name,
+			"project_id":   args.ProjectID,
+			"working_dir":  args.WorkingDir,
 		})
 		return createErrorResult(fmt.Sprintf("Failed to create session: %v", err)), CreateSessionResult{}, nil
 	}

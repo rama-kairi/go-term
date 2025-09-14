@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rama-kairi/go-term/internal/config"
 	"github.com/rama-kairi/go-term/internal/database"
 	"github.com/rama-kairi/go-term/internal/logger"
@@ -265,5 +266,54 @@ func TestSecurityValidator(t *testing.T) {
 				t.Errorf("Unexpected error for command '%s': %v", tt.command, err)
 			}
 		})
+	}
+}
+
+// TestCreateSessionWithWorkingDir tests creating sessions with working directory parameter
+func TestCreateSessionWithWorkingDir(t *testing.T) {
+	tools, manager, tempDir := setupTestEnvironment(t)
+	defer os.RemoveAll(tempDir)
+	defer manager.Shutdown()
+
+	ctx := context.Background()
+
+	// Test creating a session with working directory
+	args := CreateSessionArgs{
+		Name:       "test-workdir-session",
+		WorkingDir: "/tmp",
+	}
+
+	result, createResult, err := tools.CreateSession(ctx, nil, args)
+	if err != nil {
+		t.Fatalf("Failed to create session with working dir: %v", err)
+	}
+
+	if result.IsError {
+		t.Fatalf("CreateSession returned error: %s", string(result.Content[0].(*mcp.TextContent).Text))
+	}
+
+	// Verify the working directory was set correctly
+	if createResult.WorkingDir != "/tmp" {
+		t.Errorf("Expected working dir '/tmp', got '%s'", createResult.WorkingDir)
+	}
+
+	// Test creating a session with custom project ID
+	args2 := CreateSessionArgs{
+		Name:      "test-project-session",
+		ProjectID: "custom_project_123",
+	}
+
+	result2, createResult2, err := tools.CreateSession(ctx, nil, args2)
+	if err != nil {
+		t.Fatalf("Failed to create session with project ID: %v", err)
+	}
+
+	if result2.IsError {
+		t.Fatalf("CreateSession returned error: %s", string(result2.Content[0].(*mcp.TextContent).Text))
+	}
+
+	// Verify the project ID was set correctly
+	if createResult2.ProjectID != "custom_project_123" {
+		t.Errorf("Expected project ID 'custom_project_123', got '%s'", createResult2.ProjectID)
 	}
 }

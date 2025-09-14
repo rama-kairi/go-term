@@ -131,7 +131,9 @@ func (s *SecurityValidator) ValidateCommand(command string) error {
 
 // CreateSessionArgs represents arguments for creating a terminal session (simplified)
 type CreateSessionArgs struct {
-	Name string `json:"name" jsonschema:"required,description=Simple descriptive name for the terminal session"`
+	Name       string `json:"name" jsonschema:"required,description=Simple descriptive name for the terminal session"`
+	ProjectID  string `json:"project_id,omitempty" jsonschema:"description=Optional: Custom project ID to group related sessions. Auto-generated from directory name if not provided."`
+	WorkingDir string `json:"working_dir,omitempty" jsonschema:"description=Optional: Starting directory for the session. Uses current directory if not specified."`
 }
 
 // CreateSessionResult represents the result of creating a terminal session with project info
