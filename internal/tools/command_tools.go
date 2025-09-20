@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -25,6 +26,16 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 		return createErrorResult(fmt.Sprintf("Command blocked for security reasons: %v. Tip: Check if the command contains restricted characters or operations. Review security settings or use a different approach.", err)), RunCommandResult{}, nil
 	}
 
+	// Determine timeout value
+	timeoutSeconds := args.Timeout
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 60 // Default 60 seconds
+	}
+	if timeoutSeconds > 300 {
+		timeoutSeconds = 300 // Maximum 5 minutes
+	}
+	timeout := time.Duration(timeoutSeconds) * time.Second
+
 	// Verify session exists
 	session, err := t.manager.GetSession(args.SessionID)
 	if err != nil {
@@ -42,38 +53,31 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 	// Enhance command with package manager intelligence
 	enhancedCommand := t.enhanceCommandWithPackageManager(args.Command, currentWorkingDir)
 
-	// Execute the command in foreground only
+	// Execute the command in foreground with timeout
 	startTime := time.Now()
 	var output, errorOutput string
 	var success bool
 	var exitCode int
 	var totalChunks int
 	streamingUsed := false
+	timedOut := false
 
-	// Execute with streaming if enabled, otherwise use traditional execution
-	if t.config.Streaming.Enable {
-		streamingUsed = true
-		streamOutput, streamErr := t.manager.ExecuteCommandWithStreaming(args.SessionID, enhancedCommand)
+	// Use timeout for command execution
+	output, err = t.manager.ExecuteCommandWithTimeout(args.SessionID, enhancedCommand, timeout)
+	success = err == nil
+	exitCode = 0
 
-		success = streamErr == nil
-		exitCode = 0
-		output = streamOutput
-		totalChunks = 1
+	if err != nil {
+		errorOutput = err.Error()
+		exitCode = 1
 
-		if streamErr != nil {
-			errorOutput = streamErr.Error()
-			exitCode = 1
-			success = false
-		}
-	} else {
-		// Fall back to traditional execution
-		output, err = t.manager.ExecuteCommand(args.SessionID, enhancedCommand)
-		success = err == nil
-		exitCode = 0
-
-		if err != nil {
-			errorOutput = err.Error()
-			exitCode = 1
+		// Check if error is due to timeout
+		if strings.Contains(err.Error(), "context deadline exceeded") ||
+			strings.Contains(err.Error(), "timeout") ||
+			strings.Contains(err.Error(), "signal: killed") {
+			timedOut = true
+			errorOutput = fmt.Sprintf("Command timed out after %d seconds: %v", timeoutSeconds, err)
+			exitCode = 124 // Standard timeout exit code
 		}
 	}
 
@@ -102,6 +106,8 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 		TotalChunks:    totalChunks,
 		PackageManager: packageManager,
 		ProjectType:    projectType,
+		TimeoutUsed:    timeoutSeconds,
+		TimedOut:       timedOut,
 	}
 
 	// Create response
@@ -119,6 +125,8 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 		"duration":        duration.String(),
 		"package_manager": packageManager,
 		"project_type":    projectType,
+		"timeout_used":    timeoutSeconds,
+		"timed_out":       timedOut,
 	})
 
 	return &mcp.CallToolResult{

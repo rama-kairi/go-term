@@ -201,6 +201,7 @@ type DeleteSessionResult struct {
 type RunCommandArgs struct {
 	SessionID string `json:"session_id" jsonschema:"required,description=The UUID4 identifier of the terminal session to run the command in. Use list_terminal_sessions to see available sessions."`
 	Command   string `json:"command" jsonschema:"required,description=The command to execute in the terminal session. Will be validated for security before execution. Directory changes (cd) persist across commands. This tool only runs foreground commands - use run_background_process for long-running processes."`
+	Timeout   int    `json:"timeout,omitempty" jsonschema:"description=Optional: Command timeout in seconds. Default: 60 seconds. Maximum: 300 seconds (5 minutes). Set to 0 to use default timeout."`
 }
 
 // RunCommandResult represents the result of running a foreground command
@@ -220,6 +221,8 @@ type RunCommandResult struct {
 	TotalChunks    int    `json:"total_chunks,omitempty"`    // Number of stream chunks if streaming was used
 	PackageManager string `json:"package_manager,omitempty"` // Detected package manager used
 	ProjectType    string `json:"project_type,omitempty"`    // Detected project type
+	TimeoutUsed    int    `json:"timeout_used"`              // Timeout value used in seconds
+	TimedOut       bool   `json:"timed_out"`                 // Whether command was terminated due to timeout
 }
 
 // CheckBackgroundProcessArgs represents arguments for checking background process status

@@ -317,3 +317,129 @@ func TestCreateSessionWithWorkingDir(t *testing.T) {
 		t.Errorf("Expected project ID 'custom_project_123', got '%s'", createResult2.ProjectID)
 	}
 }
+
+// TestRunCommandTimeout tests the timeout functionality for run_command
+func TestRunCommandTimeout(t *testing.T) {
+	tools, manager, tempDir := setupTestEnvironment(t)
+	defer func() {
+		manager.Shutdown()
+		os.RemoveAll(tempDir)
+	}()
+
+	ctx := context.Background()
+
+	// Create a test session
+	createArgs := CreateSessionArgs{Name: "timeout-test-session"}
+	_, createResult, err := tools.CreateSession(ctx, nil, createArgs)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	// Test 1: Command that should complete within timeout
+	t.Run("CommandWithinTimeout", func(t *testing.T) {
+		args := RunCommandArgs{
+			SessionID: createResult.SessionID,
+			Command:   "echo 'quick command'",
+			Timeout:   5, // 5 seconds should be plenty
+		}
+
+		result, runResult, err := tools.RunCommand(ctx, nil, args)
+		if err != nil {
+			t.Fatalf("Failed to run command: %v", err)
+		}
+
+		if result.IsError {
+			t.Fatalf("RunCommand returned error: %s", string(result.Content[0].(*mcp.TextContent).Text))
+		}
+
+		if !runResult.Success {
+			t.Errorf("Expected command to succeed, but it failed: %s", runResult.ErrorOutput)
+		}
+
+		if runResult.TimedOut {
+			t.Errorf("Expected command not to timeout, but it did")
+		}
+
+		if runResult.TimeoutUsed != 5 {
+			t.Errorf("Expected timeout used to be 5, got %d", runResult.TimeoutUsed)
+		}
+	})
+
+	// Test 2: Command that should timeout
+	t.Run("CommandTimeout", func(t *testing.T) {
+		args := RunCommandArgs{
+			SessionID: createResult.SessionID,
+			Command:   "sleep 10", // This should timeout with 2 second limit
+			Timeout:   2,          // 2 seconds timeout
+		}
+
+		result, runResult, err := tools.RunCommand(ctx, nil, args)
+		if err != nil {
+			t.Fatalf("Failed to run command: %v", err)
+		}
+
+		if result.IsError {
+			t.Fatalf("RunCommand returned error: %s", string(result.Content[0].(*mcp.TextContent).Text))
+		}
+
+		if runResult.Success {
+			t.Errorf("Expected command to fail due to timeout, but it succeeded")
+		}
+
+		if !runResult.TimedOut {
+			t.Errorf("Expected command to timeout, but it didn't")
+		}
+
+		if runResult.TimeoutUsed != 2 {
+			t.Errorf("Expected timeout used to be 2, got %d", runResult.TimeoutUsed)
+		}
+
+		if runResult.ExitCode != 124 { // Standard timeout exit code
+			t.Errorf("Expected exit code 124 for timeout, got %d", runResult.ExitCode)
+		}
+	})
+
+	// Test 3: Default timeout (should be 60 seconds)
+	t.Run("DefaultTimeout", func(t *testing.T) {
+		args := RunCommandArgs{
+			SessionID: createResult.SessionID,
+			Command:   "echo 'default timeout test'",
+			Timeout:   0, // Use default
+		}
+
+		result, runResult, err := tools.RunCommand(ctx, nil, args)
+		if err != nil {
+			t.Fatalf("Failed to run command: %v", err)
+		}
+
+		if result.IsError {
+			t.Fatalf("RunCommand returned error: %s", string(result.Content[0].(*mcp.TextContent).Text))
+		}
+
+		if runResult.TimeoutUsed != 60 {
+			t.Errorf("Expected default timeout to be 60, got %d", runResult.TimeoutUsed)
+		}
+	})
+
+	// Test 4: Maximum timeout limit (should be capped at 300 seconds)
+	t.Run("MaximumTimeoutLimit", func(t *testing.T) {
+		args := RunCommandArgs{
+			SessionID: createResult.SessionID,
+			Command:   "echo 'max timeout test'",
+			Timeout:   500, // Request 500 seconds, should be capped at 300
+		}
+
+		result, runResult, err := tools.RunCommand(ctx, nil, args)
+		if err != nil {
+			t.Fatalf("Failed to run command: %v", err)
+		}
+
+		if result.IsError {
+			t.Fatalf("RunCommand returned error: %s", string(result.Content[0].(*mcp.TextContent).Text))
+		}
+
+		if runResult.TimeoutUsed != 300 {
+			t.Errorf("Expected timeout to be capped at 300, got %d", runResult.TimeoutUsed)
+		}
+	})
+}

@@ -136,6 +136,10 @@ func main() {
 					Type:        "string",
 					Description: "Command to execute in foreground that will complete and exit. Examples: 'npm install', 'git commit -m \"message\"', 'go build', 'pytest', 'ls -la'. This tool blocks until command finishes.",
 				},
+				"timeout": {
+					Type:        "integer",
+					Description: "Optional: Command timeout in seconds. Default: 60 seconds. Maximum: 300 seconds (5 minutes). Set to 0 to use default timeout.",
+				},
 			},
 			Required: []string{"session_id", "command"},
 		},
