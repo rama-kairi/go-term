@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -820,18 +821,100 @@ func (m *Manager) executeCommandInSession(ctx context.Context, session *Session,
 	}
 	cmd.Env = env
 
-	output, err := cmd.CombinedOutput()
-	exitCode := 0
-
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			exitCode = exitError.ExitCode()
-		} else {
-			exitCode = 1
-		}
+	// CRITICAL FIX: Set up proper process group handling for timeout support
+	// This ensures that when the context is cancelled, all child processes are terminated
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true, // Create a new process group
 	}
 
-	return string(output), exitCode, err
+	// Capture output using pipes
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", 1, fmt.Errorf("failed to create stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", 1, fmt.Errorf("failed to create stderr pipe: %v", err)
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return "", 1, fmt.Errorf("failed to start command: %v", err)
+	}
+
+	// Read output in goroutines
+	var outputBuilder strings.Builder
+	outputDone := make(chan bool, 2)
+
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			outputBuilder.WriteString(scanner.Text() + "\n")
+		}
+		outputDone <- true
+	}()
+
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			outputBuilder.WriteString(scanner.Text() + "\n")
+		}
+		outputDone <- true
+	}()
+
+	// Set up a goroutine to handle command completion
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	// Wait for either completion or context cancellation
+	select {
+	case <-ctx.Done():
+		// Context was cancelled (timeout or manual cancellation)
+		// Kill the entire process group to ensure all child processes are terminated
+		if cmd.Process != nil {
+			pgid := cmd.Process.Pid
+			// Send SIGTERM to the entire process group
+			if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+				// If SIGTERM fails, try SIGKILL
+				syscall.Kill(-pgid, syscall.SIGKILL)
+			}
+		}
+
+		// Wait a short time for the process to terminate gracefully
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+			// Force kill if still running
+			if cmd.Process != nil {
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		}
+
+		// Wait for output goroutines to finish
+		go func() {
+			<-outputDone
+			<-outputDone
+		}()
+
+		return outputBuilder.String(), 124, ctx.Err() // Exit code 124 indicates timeout
+	case err := <-done:
+		// Command completed normally, wait for output to be read
+		<-outputDone
+		<-outputDone
+
+		exitCode := 0
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				exitCode = exitError.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+
+		return outputBuilder.String(), exitCode, err
+	}
 } // isDirectoryChangeCommand checks if the command is a directory change command
 func (m *Manager) isDirectoryChangeCommand(command string) bool {
 	trimmed := strings.TrimSpace(command)

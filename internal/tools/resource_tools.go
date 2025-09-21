@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"time"
 
@@ -40,7 +41,7 @@ func (t *TerminalTools) GetResourceStatus(ctx context.Context, req *mcp.CallTool
 
 	// Get current resource summary
 	resourceData := resourceMonitor.GetResourceSummary()
-	
+
 	result := GetResourceStatusResult{
 		Status:        "success",
 		Message:       "Resource status retrieved successfully",
@@ -67,12 +68,12 @@ type CheckResourceLeaksArgs struct {
 
 // CheckResourceLeaksResult represents the result of checking resource leaks
 type CheckResourceLeaksResult struct {
-	Status             string                 `json:"status"`
-	Message            string                 `json:"message"`
-	PotentialLeaks     bool                   `json:"potential_leaks"`
-	ResourceMetrics    map[string]interface{} `json:"resource_metrics"`
-	Recommendations    []string               `json:"recommendations"`
-	LeakAnalysis       map[string]interface{} `json:"leak_analysis"`
+	Status          string                 `json:"status"`
+	Message         string                 `json:"message"`
+	PotentialLeaks  bool                   `json:"potential_leaks"`
+	ResourceMetrics map[string]interface{} `json:"resource_metrics"`
+	Recommendations []string               `json:"recommendations"`
+	LeakAnalysis    map[string]interface{} `json:"leak_analysis"`
 }
 
 // CheckResourceLeaks analyzes current resource usage for potential leaks
@@ -86,7 +87,7 @@ func (t *TerminalTools) CheckResourceLeaks(ctx context.Context, req *mcp.CallToo
 	// Get current metrics
 	currentMetrics := resourceMonitor.GetCurrentMetrics()
 	resourceSummary := resourceMonitor.GetResourceSummary()
-	
+
 	// Set default threshold
 	threshold := args.Threshold
 	if threshold == 0 {
@@ -103,10 +104,10 @@ func (t *TerminalTools) CheckResourceLeaks(ctx context.Context, req *mcp.CallToo
 		potentialLeaks = true
 		recommendations = append(recommendations, "Potential goroutine leak detected - check background processes for proper cleanup")
 		leakAnalysis["goroutine_leak"] = map[string]interface{}{
-			"detected": true,
+			"detected":           true,
 			"current_goroutines": currentMetrics.Goroutines,
-			"baseline": resourceSummary["baseline_goroutines"],
-			"increase": resourceSummary["goroutines_increase"],
+			"baseline":           resourceSummary["baseline_goroutines"],
+			"increase":           resourceSummary["goroutines_increase"],
 		}
 	}
 
@@ -115,10 +116,10 @@ func (t *TerminalTools) CheckResourceLeaks(ctx context.Context, req *mcp.CallToo
 		potentialLeaks = true
 		recommendations = append(recommendations, "Potential memory leak detected - consider forcing garbage collection or restarting server")
 		leakAnalysis["memory_leak"] = map[string]interface{}{
-			"detected": true,
+			"detected":          true,
 			"current_memory_mb": currentMetrics.MemoryAlloc,
-			"baseline_mb": resourceSummary["baseline_memory_mb"],
-			"increase_mb": resourceSummary["memory_increase_mb"],
+			"baseline_mb":       resourceSummary["baseline_memory_mb"],
+			"increase_mb":       resourceSummary["memory_increase_mb"],
 		}
 	}
 
@@ -127,9 +128,9 @@ func (t *TerminalTools) CheckResourceLeaks(ctx context.Context, req *mcp.CallToo
 		potentialLeaks = true
 		recommendations = append(recommendations, "High number of heap objects detected - monitor for object accumulation")
 		leakAnalysis["heap_objects"] = map[string]interface{}{
-			"detected": true,
+			"detected":     true,
 			"heap_objects": currentMetrics.MemoryHeapObjs,
-			"threshold": 500000,
+			"threshold":    500000,
 		}
 	}
 
@@ -150,12 +151,12 @@ func (t *TerminalTools) CheckResourceLeaks(ctx context.Context, req *mcp.CallToo
 	}
 
 	result := CheckResourceLeaksResult{
-		Status:             "success",
-		Message:            "Resource leak analysis completed",
-		PotentialLeaks:     potentialLeaks,
-		ResourceMetrics:    resourceSummary,
-		Recommendations:    recommendations,
-		LeakAnalysis:       leakAnalysis,
+		Status:          "success",
+		Message:         "Resource leak analysis completed",
+		PotentialLeaks:  potentialLeaks,
+		ResourceMetrics: resourceSummary,
+		Recommendations: recommendations,
+		LeakAnalysis:    leakAnalysis,
 	}
 
 	resultJSON, _ := json.MarshalIndent(result, "", "  ")
@@ -167,10 +168,10 @@ func (t *TerminalTools) CheckResourceLeaks(ctx context.Context, req *mcp.CallToo
 
 	t.logger.Info("Resource leak check completed", map[string]interface{}{
 		"potential_leaks": potentialLeaks,
-		"goroutines": currentMetrics.Goroutines,
-		"memory_mb": currentMetrics.MemoryAlloc,
+		"goroutines":      currentMetrics.Goroutines,
+		"memory_mb":       currentMetrics.MemoryAlloc,
 		"active_sessions": sessionCount,
-		"bg_processes": bgProcessCount,
+		"bg_processes":    bgProcessCount,
 	})
 
 	return &mcp.CallToolResult{
@@ -186,11 +187,11 @@ type ForceCleanupArgs struct {
 
 // ForceCleanupResult represents the result of forcing resource cleanup
 type ForceCleanupResult struct {
-	Status        string                 `json:"status"`
-	Message       string                 `json:"message"`
+	Status         string                 `json:"status"`
+	Message        string                 `json:"message"`
 	CleanupActions []string               `json:"cleanup_actions"`
-	BeforeMetrics map[string]interface{} `json:"before_metrics"`
-	AfterMetrics  map[string]interface{} `json:"after_metrics"`
+	BeforeMetrics  map[string]interface{} `json:"before_metrics"`
+	AfterMetrics   map[string]interface{} `json:"after_metrics"`
 }
 
 // ForceCleanup performs aggressive resource cleanup to address potential leaks
@@ -220,21 +221,93 @@ func (t *TerminalTools) ForceCleanup(ctx context.Context, req *mcp.CallToolReque
 	case "gc":
 		resourceMonitor.ForceGC()
 		cleanupActions = append(cleanupActions, "Forced garbage collection (2x)")
-		
+
 	case "sessions":
-		// Note: Actual session cleanup would require more complex logic
-		// This is a placeholder for future implementation
-		cleanupActions = append(cleanupActions, "Session cleanup not implemented yet")
-		
+		// Clean up inactive sessions (sessions with no activity in the last hour)
+		sessions := t.manager.ListSessions()
+		inactiveSessions := 0
+		cleanupErrors := 0
+
+		for _, session := range sessions {
+			// Check if session has been inactive for more than 1 hour
+			if time.Since(session.LastUsedAt) > time.Hour {
+				if err := t.manager.DeleteSession(session.ID); err != nil {
+					cleanupErrors++
+					t.logger.Error("Failed to delete inactive session", err, map[string]interface{}{
+						"session_id": session.ID,
+					})
+				} else {
+					inactiveSessions++
+				}
+			}
+		}
+
+		if cleanupErrors > 0 {
+			cleanupActions = append(cleanupActions, fmt.Sprintf("Cleaned up %d inactive sessions (%d errors)", inactiveSessions, cleanupErrors))
+		} else {
+			cleanupActions = append(cleanupActions, fmt.Sprintf("Cleaned up %d inactive sessions", inactiveSessions))
+		}
+
 	case "processes":
-		// Note: Process cleanup would require careful handling
-		cleanupActions = append(cleanupActions, "Process cleanup not implemented yet")
-		
+		// Terminate all background processes
+		sessions := t.manager.ListSessions()
+		processesTerminated := 0
+		terminationErrors := 0
+
+		for _, session := range sessions {
+			// Get background processes from session directly
+			for processID, process := range session.BackgroundProcesses {
+				if process.IsRunning {
+					if err := t.manager.TerminateBackgroundProcess(session.ID, processID, true); err != nil {
+						terminationErrors++
+						t.logger.Error("Failed to terminate background process", err, map[string]interface{}{
+							"session_id": session.ID,
+							"process_id": processID,
+						})
+					} else {
+						processesTerminated++
+					}
+				}
+			}
+		}
+
+		if terminationErrors > 0 {
+			cleanupActions = append(cleanupActions, fmt.Sprintf("Terminated %d background processes (%d errors)", processesTerminated, terminationErrors))
+		} else {
+			cleanupActions = append(cleanupActions, fmt.Sprintf("Terminated %d background processes", processesTerminated))
+		}
+
 	case "all":
 		resourceMonitor.ForceGC()
 		cleanupActions = append(cleanupActions, "Forced garbage collection (2x)")
+
+		// Clean up inactive sessions
+		sessions := t.manager.ListSessions()
+		inactiveSessions := 0
+		processesTerminated := 0
+
+		for _, session := range sessions {
+			// Terminate background processes first using session.BackgroundProcesses
+			for processID, process := range session.BackgroundProcesses {
+				if process.IsRunning {
+					if err := t.manager.TerminateBackgroundProcess(session.ID, processID, true); err == nil {
+						processesTerminated++
+					}
+				}
+			}
+
+			// Clean up inactive sessions
+			if time.Since(session.LastUsedAt) > time.Hour {
+				if err := t.manager.DeleteSession(session.ID); err == nil {
+					inactiveSessions++
+				}
+			}
+		}
+
+		cleanupActions = append(cleanupActions, fmt.Sprintf("Terminated %d background processes", processesTerminated))
+		cleanupActions = append(cleanupActions, fmt.Sprintf("Cleaned up %d inactive sessions", inactiveSessions))
 		cleanupActions = append(cleanupActions, "Full resource cleanup performed")
-		
+
 	default:
 		return createErrorResult("Invalid cleanup_type. Use: gc, sessions, processes, or all"), ForceCleanupResult{}, nil
 	}
@@ -261,12 +334,12 @@ func (t *TerminalTools) ForceCleanup(ctx context.Context, req *mcp.CallToolReque
 	}
 
 	t.logger.Info("Resource cleanup completed", map[string]interface{}{
-		"cleanup_type": cleanupType,
-		"actions": cleanupActions,
+		"cleanup_type":      cleanupType,
+		"actions":           cleanupActions,
 		"goroutines_before": beforeMetrics["goroutines"],
-		"goroutines_after": afterMetrics["goroutines"],
-		"memory_before_mb": beforeMetrics["memory_alloc_mb"],
-		"memory_after_mb": afterMetrics["memory_alloc_mb"],
+		"goroutines_after":  afterMetrics["goroutines"],
+		"memory_before_mb":  beforeMetrics["memory_alloc_mb"],
+		"memory_after_mb":   afterMetrics["memory_alloc_mb"],
 	})
 
 	return &mcp.CallToolResult{
