@@ -1,5 +1,5 @@
 # Binaries
-github.com/rama-kairi/go-term
+go-term
 *.exe
 *.exe~
 *.dll
@@ -57,3 +57,6 @@ coverage.html
 
 # Documentation build
 docs/_build/
+
+# build artifacts of go-term
+go-term
