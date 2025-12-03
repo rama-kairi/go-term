@@ -7,15 +7,22 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rama-kairi/go-term/internal/config"
 	"github.com/rama-kairi/go-term/internal/database"
 	"github.com/rama-kairi/go-term/internal/logger"
+	"github.com/rama-kairi/go-term/internal/monitoring"
 	"github.com/rama-kairi/go-term/internal/terminal"
 	"github.com/rama-kairi/go-term/internal/tools"
 )
+
+// boolPtr returns a pointer to a boolean value (used for MCP tool annotations)
+func boolPtr(b bool) *bool {
+	return &b
+}
 
 func main() {
 	// Parse command line flags
@@ -78,6 +85,29 @@ func main() {
 	// Create terminal session manager with enhanced features
 	terminalManager := terminal.NewManager(cfg, appLogger, db)
 
+	// M8: Initialize health endpoint if enabled
+	if cfg.Monitoring.EnableMetrics {
+		healthEndpoint := monitoring.NewHealthEndpoint(cfg.Monitoring.HealthCheckPort, nil)
+		if db != nil {
+			healthEndpoint.RegisterHealthCheck("database", db)
+		}
+		if err := healthEndpoint.Start(); err != nil {
+			appLogger.Warn("Failed to start health endpoint", map[string]interface{}{
+				"error": err.Error(),
+				"port":  cfg.Monitoring.HealthCheckPort,
+			})
+		} else {
+			appLogger.Info("Health endpoint started", map[string]interface{}{
+				"port": cfg.Monitoring.HealthCheckPort,
+			})
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				healthEndpoint.Stop(ctx)
+			}()
+		}
+	}
+
 	// Create terminal tools with enhanced features
 	terminalTools := tools.NewTerminalTools(terminalManager, cfg, appLogger, db)
 
@@ -109,6 +139,10 @@ func main() {
 			},
 			Required: []string{"name"},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Create Terminal Session",
+			ReadOnlyHint: false,
+		},
 	}, terminalTools.CreateSession)
 
 	// Register list terminal sessions tool with enhanced information
@@ -118,6 +152,10 @@ func main() {
 		InputSchema: &jsonschema.Schema{
 			Type:       "object",
 			Properties: map[string]*jsonschema.Schema{},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "List Terminal Sessions",
+			ReadOnlyHint: true,
 		},
 	}, terminalTools.ListSessions)
 
@@ -143,6 +181,12 @@ func main() {
 			},
 			Required: []string{"session_id", "command"},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Run Command",
+			ReadOnlyHint:    false,
+			DestructiveHint: boolPtr(false),
+			OpenWorldHint:   boolPtr(true),
+		},
 	}, terminalTools.RunCommand)
 
 	// Register run background process tool
@@ -163,6 +207,11 @@ func main() {
 			},
 			Required: []string{"session_id", "command"},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:         "Run Background Process",
+			ReadOnlyHint:  false,
+			OpenWorldHint: boolPtr(true),
+		},
 	}, terminalTools.RunBackgroundProcess)
 
 	// Register list background processes tool
@@ -181,6 +230,10 @@ func main() {
 					Description: "Optional: Filter by specific project ID. Leave empty to list all background processes.",
 				},
 			},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "List Background Processes",
+			ReadOnlyHint: true,
 		},
 	}, terminalTools.ListBackgroundProcesses)
 
@@ -205,6 +258,11 @@ func main() {
 				},
 			},
 			Required: []string{"session_id", "process_id"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Terminate Background Process",
+			ReadOnlyHint:    false,
+			DestructiveHint: boolPtr(true),
 		},
 	}, terminalTools.TerminateBackgroundProcess)
 
@@ -270,6 +328,10 @@ func main() {
 				},
 			},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Search Terminal History",
+			ReadOnlyHint: true,
+		},
 	}, terminalTools.SearchHistory)
 
 	// Register delete session tool for session management
@@ -294,6 +356,11 @@ func main() {
 			},
 			Required: []string{"confirm"},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Delete Session",
+			ReadOnlyHint:    false,
+			DestructiveHint: boolPtr(true),
+		},
 	}, terminalTools.DeleteSession)
 
 	// Register background process monitoring tool
@@ -314,6 +381,10 @@ func main() {
 			},
 			Required: []string{"session_id"},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Check Background Process",
+			ReadOnlyHint: true,
+		},
 	}, terminalTools.CheckBackgroundProcess)
 
 	// Register resource monitoring tools
@@ -329,6 +400,10 @@ func main() {
 				},
 			},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Get Resource Status",
+			ReadOnlyHint: true,
+		},
 	}, terminalTools.GetResourceStatus)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -342,6 +417,10 @@ func main() {
 					Description: "Custom threshold for goroutine leak detection (number of goroutines increase to consider suspicious). Default: 50 goroutines.",
 				},
 			},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Check Resource Leaks",
+			ReadOnlyHint: true,
 		},
 	}, terminalTools.CheckResourceLeaks)
 
@@ -362,10 +441,382 @@ func main() {
 			},
 			Required: []string{"confirm"},
 		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:           "Force Resource Cleanup",
+			ReadOnlyHint:    false,
+			DestructiveHint: boolPtr(true),
+		},
 	}, terminalTools.ForceCleanup)
 
+	// F1: Register command template tools
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "create_command_template",
+		Description: "Create a reusable command template with variable placeholders. Templates can include variables like {{name}} that get replaced when the template is used. Useful for frequently used commands with slight variations.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"name": {
+					Type:        "string",
+					Description: "Unique name for the template (e.g., 'build-docker', 'deploy-staging')",
+				},
+				"command": {
+					Type:        "string",
+					Description: "Command template with optional {{variable}} placeholders (e.g., 'docker build -t {{image_name}} .')",
+				},
+				"description": {
+					Type:        "string",
+					Description: "Description of what the template does",
+				},
+				"category": {
+					Type:        "string",
+					Description: "Optional category for organizing templates (e.g., 'docker', 'git', 'deployment')",
+				},
+			},
+			Required: []string{"name", "command"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Create Command Template",
+			ReadOnlyHint: false,
+		},
+	}, terminalTools.CreateCommandTemplate)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_command_templates",
+		Description: "List all saved command templates, optionally filtered by category.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"category": {
+					Type:        "string",
+					Description: "Optional category to filter templates",
+				},
+			},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "List Command Templates",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.ListCommandTemplates)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "expand_command_template",
+		Description: "Expand a command template by replacing variable placeholders with actual values.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"template_name": {
+					Type:        "string",
+					Description: "Name of the template to expand",
+				},
+				"variables": {
+					Type:        "object",
+					Description: "Map of variable names to values (e.g., {\"image_name\": \"myapp:latest\"})",
+				},
+			},
+			Required: []string{"template_name"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Expand Command Template",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.ExpandCommandTemplate)
+
+	// F6: Register output search tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "search_command_output",
+		Description: "Search through command outputs for specific patterns or text. Supports regex patterns and case-insensitive matching.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Session ID to search in",
+				},
+				"pattern": {
+					Type:        "string",
+					Description: "Search pattern (text or regex)",
+				},
+				"is_regex": {
+					Type:        "boolean",
+					Description: "Whether the pattern is a regular expression (default: false)",
+				},
+				"case_sensitive": {
+					Type:        "boolean",
+					Description: "Whether the search is case-sensitive (default: false)",
+				},
+				"context_lines": {
+					Type:        "integer",
+					Description: "Number of lines to include before and after matches (default: 2)",
+				},
+				"max_results": {
+					Type:        "integer",
+					Description: "Maximum number of results to return (default: 50)",
+				},
+			},
+			Required: []string{"session_id", "pattern"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Search Command Output",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.SearchCommandOutput)
+
+	// F2: Register session snapshot tools
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "save_session_snapshot",
+		Description: "Save a snapshot of the current session state including environment, working directory, and command history.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Session ID to snapshot",
+				},
+				"name": {
+					Type:        "string",
+					Description: "Name for the snapshot",
+				},
+				"description": {
+					Type:        "string",
+					Description: "Optional description of what this snapshot represents",
+				},
+			},
+			Required: []string{"session_id", "name"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Save Session Snapshot",
+			ReadOnlyHint: false,
+		},
+	}, terminalTools.SaveSessionSnapshot)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_session_snapshots",
+		Description: "List all saved session snapshots.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Optional: filter by session ID",
+				},
+			},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "List Session Snapshots",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.ListSessionSnapshots)
+
+	// F7: Register process chain tools
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "create_process_chain",
+		Description: "Create a chain of background processes that run in sequence with dependency management. Processes in the chain start one after another, optionally waiting for readiness signals.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Session ID to run processes in",
+				},
+				"name": {
+					Type:        "string",
+					Description: "Name for the process chain",
+				},
+				"description": {
+					Type:        "string",
+					Description: "Description of what this chain does",
+				},
+				"processes": {
+					Type:        "array",
+					Description: "List of processes to run in order. Each has: name, command, ready_pattern (optional), wait_seconds (optional)",
+					Items: &jsonschema.Schema{
+						Type: "object",
+						Properties: map[string]*jsonschema.Schema{
+							"name": {
+								Type:        "string",
+								Description: "Name of this process in the chain",
+							},
+							"command": {
+								Type:        "string",
+								Description: "Command to execute",
+							},
+							"ready_pattern": {
+								Type:        "string",
+								Description: "Pattern in output indicating process is ready (optional)",
+							},
+							"wait_seconds": {
+								Type:        "integer",
+								Description: "Seconds to wait after starting before proceeding to next process (optional)",
+							},
+						},
+						Required: []string{"name", "command"},
+					},
+				},
+			},
+			Required: []string{"session_id", "name", "processes"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Create Process Chain",
+			ReadOnlyHint: false,
+		},
+	}, terminalTools.CreateProcessChain)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "start_process_chain",
+		Description: "Start executing a previously created process chain.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"chain_id": {
+					Type:        "string",
+					Description: "ID of the chain to start",
+				},
+			},
+			Required: []string{"chain_id"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Start Process Chain",
+			ReadOnlyHint: false,
+		},
+	}, terminalTools.StartProcessChain)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_process_chain_status",
+		Description: "Get the current status of a process chain including status of each process in the chain.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"chain_id": {
+					Type:        "string",
+					Description: "ID of the chain to check",
+				},
+			},
+			Required: []string{"chain_id"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Get Process Chain Status",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.GetProcessChainStatus)
+
+	// Environment variable management tools (M4)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "set_session_environment",
+		Description: "Set or update environment variables for a terminal session. These variables will be available to all commands executed in the session.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "The session ID to set environment variables for",
+				},
+				"variables": {
+					Type:        "object",
+					Description: "Map of environment variable names to values",
+					AdditionalProperties: &jsonschema.Schema{
+						Type: "string",
+					},
+				},
+			},
+			Required: []string{"session_id", "variables"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title: "Set Session Environment Variables",
+		},
+	}, terminalTools.SetSessionEnvironment)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_session_environment",
+		Description: "Get environment variables for a terminal session. Can retrieve all variables or a specific one.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "The session ID to get environment variables from",
+				},
+				"key": {
+					Type:        "string",
+					Description: "Specific environment variable key to retrieve. If not provided, returns all variables",
+				},
+			},
+			Required: []string{"session_id"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Get Session Environment Variables",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.GetSessionEnvironment)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "unset_session_environment",
+		Description: "Remove environment variables from a terminal session.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "The session ID to unset environment variables from",
+				},
+				"keys": {
+					Type:        "array",
+					Description: "List of environment variable keys to remove",
+					Items: &jsonschema.Schema{
+						Type: "string",
+					},
+				},
+			},
+			Required: []string{"session_id", "keys"},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title: "Unset Session Environment Variables",
+		},
+	}, terminalTools.UnsetSessionEnvironment)
+
+	// M9: Session Activity Metrics tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_session_activity_metrics",
+		Description: "Get detailed activity metrics for terminal sessions including command counts, success rates, execution times, command type distribution, and error categories.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"session_id": {
+					Type:        "string",
+					Description: "Session ID to get metrics for. If not provided, returns metrics for all sessions.",
+				},
+			},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Get Session Activity Metrics",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.GetSessionActivityMetrics)
+
+	// M10: Command Execution Tracing tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_traces",
+		Description: "Get OpenTelemetry-compatible trace spans for command execution. Useful for debugging and performance analysis.",
+		InputSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"limit": {
+					Type:        "integer",
+					Description: "Maximum number of spans to return (default: 100, max: 1000)",
+				},
+				"trace_id": {
+					Type:        "string",
+					Description: "Filter by specific trace ID",
+				},
+			},
+		},
+		Annotations: &mcp.ToolAnnotations{
+			Title:        "Get Command Traces",
+			ReadOnlyHint: true,
+		},
+	}, terminalTools.GetTraces)
+
 	appLogger.Info("Terminal MCP Server registered all tools successfully", map[string]interface{}{
-		"tools_count": 12,
+		"tools_count": 26,
 	})
 	appLogger.Info("Available tools:")
 	appLogger.Info("  - create_terminal_session: Create isolated terminal sessions for organized project work")

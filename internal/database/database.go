@@ -1,11 +1,13 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +18,12 @@ import (
 type DB struct {
 	conn *sql.DB
 	path string
+
+	// Health check caching to reduce overhead
+	lastHealthCheck  time.Time
+	healthCheckMutex sync.RWMutex
+	healthCheckCache error
+	healthCacheTTL   time.Duration
 }
 
 // SessionRecord represents a session stored in the database
@@ -92,8 +100,9 @@ func NewDB(dbPath string) (*DB, error) {
 	conn.SetConnMaxLifetime(time.Hour)
 
 	db := &DB{
-		conn: conn,
-		path: dbPath,
+		conn:           conn,
+		path:           dbPath,
+		healthCacheTTL: 5 * time.Second, // Cache health check for 5 seconds
 	}
 
 	if err := db.initialize(); err != nil {
@@ -174,18 +183,23 @@ func (db *DB) Close() error {
 
 // HealthCheck performs a simple database connectivity check
 func (db *DB) HealthCheck() error {
+	return db.HealthCheckContext(context.Background())
+}
+
+// HealthCheckContext performs a database connectivity check with context support (M3)
+func (db *DB) HealthCheckContext(ctx context.Context) error {
 	if db.conn == nil {
 		return fmt.Errorf("database connection is nil")
 	}
 
-	// Simple ping to test connectivity
-	if err := db.conn.Ping(); err != nil {
+	// Simple ping to test connectivity with context
+	if err := db.conn.PingContext(ctx); err != nil {
 		return fmt.Errorf("database ping failed: %w", err)
 	}
 
-	// Test a simple query
+	// Test a simple query with context
 	var count int
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&count)
+	err := db.conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions").Scan(&count)
 	if err != nil {
 		return fmt.Errorf("database query test failed: %w", err)
 	}
@@ -197,6 +211,11 @@ func (db *DB) HealthCheck() error {
 
 // CreateSession creates a new session record
 func (db *DB) CreateSession(session *SessionRecord) error {
+	return db.CreateSessionContext(context.Background(), session)
+}
+
+// CreateSessionContext creates a new session record with context support (M3)
+func (db *DB) CreateSessionContext(ctx context.Context, session *SessionRecord) error {
 	envJSON, err := json.Marshal(map[string]string{})
 	if err != nil {
 		return fmt.Errorf("failed to marshal environment: %w", err)
@@ -207,7 +226,7 @@ func (db *DB) CreateSession(session *SessionRecord) error {
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err = db.conn.Exec(query, session.ID, session.Name, session.ProjectID, session.WorkingDir,
+	_, err = db.conn.ExecContext(ctx, query, session.ID, session.Name, session.ProjectID, session.WorkingDir,
 		string(envJSON), session.CreatedAt, session.LastUsedAt, session.IsActive, session.CommandCount)
 
 	return err
@@ -215,12 +234,17 @@ func (db *DB) CreateSession(session *SessionRecord) error {
 
 // GetSession retrieves a session by ID
 func (db *DB) GetSession(sessionID string) (*SessionRecord, error) {
+	return db.GetSessionContext(context.Background(), sessionID)
+}
+
+// GetSessionContext retrieves a session by ID with context support (M3)
+func (db *DB) GetSessionContext(ctx context.Context, sessionID string) (*SessionRecord, error) {
 	query := `
 	SELECT id, name, project_id, working_dir, environment, created_at, last_used_at, is_active, command_count
 	FROM sessions WHERE id = ?
 	`
 
-	row := db.conn.QueryRow(query, sessionID)
+	row := db.conn.QueryRowContext(ctx, query, sessionID)
 
 	var session SessionRecord
 	var envJSON string
@@ -240,6 +264,11 @@ func (db *DB) GetSession(sessionID string) (*SessionRecord, error) {
 
 // ListSessions retrieves all sessions, optionally filtered by project
 func (db *DB) ListSessions(projectID string) ([]*SessionRecord, error) {
+	return db.ListSessionsContext(context.Background(), projectID)
+}
+
+// ListSessionsContext retrieves all sessions with context support (M3)
+func (db *DB) ListSessionsContext(ctx context.Context, projectID string) ([]*SessionRecord, error) {
 	var query string
 	var args []interface{}
 
@@ -256,7 +285,7 @@ func (db *DB) ListSessions(projectID string) ([]*SessionRecord, error) {
 		`
 	}
 
-	rows, err := db.conn.Query(query, args...)
+	rows, err := db.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -638,4 +667,44 @@ func (db *DB) GetSessionsWithStats() ([]*SessionWithStats, error) {
 	}
 
 	return sessions, rows.Err()
+}
+
+// M1: CleanupExcessCommands removes old commands exceeding the limit per session
+func (db *DB) CleanupExcessCommands(maxCommandsPerSession int) (int64, error) {
+	if maxCommandsPerSession <= 0 {
+		return 0, nil
+	}
+
+	// Delete old commands keeping only the most recent per session
+	query := `
+	DELETE FROM commands
+	WHERE id IN (
+		SELECT id FROM (
+			SELECT c.id,
+				   ROW_NUMBER() OVER (PARTITION BY c.session_id ORDER BY c.timestamp DESC) as rn
+			FROM commands c
+		) ranked
+		WHERE rn > ?
+	)
+	`
+
+	result, err := db.conn.Exec(query, maxCommandsPerSession)
+	if err != nil {
+		return 0, fmt.Errorf("failed to cleanup excess commands: %w", err)
+	}
+
+	return result.RowsAffected()
+}
+
+// M1: CleanupOldStreamChunks removes stream chunks older than the specified duration
+func (db *DB) CleanupOldStreamChunks(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-maxAge)
+
+	query := `DELETE FROM stream_chunks WHERE timestamp < ?`
+	result, err := db.conn.Exec(query, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("failed to cleanup old stream chunks: %w", err)
+	}
+
+	return result.RowsAffected()
 }

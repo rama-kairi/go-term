@@ -63,6 +63,7 @@ type Logger struct {
 	mu         sync.RWMutex
 	component  string
 	baseFields map[string]interface{}
+	fileHandle *os.File // H7: Track file handle for cleanup
 }
 
 // NewLogger creates a new logger instance
@@ -70,6 +71,7 @@ func NewLogger(cfg *config.LoggingConfig, component string) (*Logger, error) {
 	level := parseLogLevel(cfg.Level)
 
 	var output io.Writer
+	var fileHandle *os.File // H7: Track if we opened a file
 	switch cfg.Output {
 	case "stderr":
 		output = os.Stderr
@@ -82,6 +84,7 @@ func NewLogger(cfg *config.LoggingConfig, component string) (*Logger, error) {
 			return nil, fmt.Errorf("failed to open log file: %w", err)
 		}
 		output = file
+		fileHandle = file
 	default:
 		// Treat as file path
 		if strings.HasPrefix(cfg.Output, "/") || strings.Contains(cfg.Output, ".log") {
@@ -90,6 +93,7 @@ func NewLogger(cfg *config.LoggingConfig, component string) (*Logger, error) {
 				return nil, fmt.Errorf("failed to open log file %s: %w", cfg.Output, err)
 			}
 			output = file
+			fileHandle = file
 		} else {
 			output = os.Stderr
 		}
@@ -101,7 +105,21 @@ func NewLogger(cfg *config.LoggingConfig, component string) (*Logger, error) {
 		output:     output,
 		component:  component,
 		baseFields: make(map[string]interface{}),
+		fileHandle: fileHandle,
 	}, nil
+}
+
+// H7: Close closes any open file handles
+func (l *Logger) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.fileHandle != nil {
+		err := l.fileHandle.Close()
+		l.fileHandle = nil
+		return err
+	}
+	return nil
 }
 
 // SetLevel sets the logging level

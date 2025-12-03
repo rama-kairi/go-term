@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +23,33 @@ import (
 	"github.com/rama-kairi/go-term/internal/monitoring"
 	"github.com/rama-kairi/go-term/internal/utils"
 )
+
+// H4: shellEscape escapes a string for safe use in shell commands
+// This prevents shell injection attacks by escaping special characters
+func shellEscape(s string) string {
+	// If string is empty, return empty quotes
+	if s == "" {
+		return "''"
+	}
+
+	// Check if string needs escaping
+	needsEscape := false
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '-' ||
+			c == '.' || c == '/' || c == ':') {
+			needsEscape = true
+			break
+		}
+	}
+
+	if !needsEscape {
+		return s
+	}
+
+	// Use single quotes for escaping, escape any existing single quotes
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
 
 // BackgroundProcess represents a running background process
 type BackgroundProcess struct {
@@ -106,6 +134,9 @@ type Session struct {
 	// Background process tracking
 	BackgroundProcesses map[string]*BackgroundProcess `json:"background_processes,omitempty"`
 
+	// M9: Activity tracking
+	activityTracker *SessionActivityTracker `json:"-"`
+
 	// Internal fields for session management
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -126,6 +157,92 @@ type Session struct {
 // GetCurrentDir returns the current working directory of the session
 func (s *Session) GetCurrentDir() string {
 	return s.currentDir
+}
+
+// SetEnvironment sets or updates an environment variable for this session
+func (s *Session) SetEnvironment(key, value string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.Environment == nil {
+		s.Environment = make(map[string]string)
+	}
+	if s.shellEnv == nil {
+		s.shellEnv = make(map[string]string)
+	}
+
+	s.Environment[key] = value
+	s.shellEnv[key] = value
+}
+
+// SetEnvironmentBatch sets multiple environment variables at once
+func (s *Session) SetEnvironmentBatch(envVars map[string]string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.Environment == nil {
+		s.Environment = make(map[string]string)
+	}
+	if s.shellEnv == nil {
+		s.shellEnv = make(map[string]string)
+	}
+
+	for key, value := range envVars {
+		s.Environment[key] = value
+		s.shellEnv[key] = value
+	}
+}
+
+// GetEnvironment returns the value of an environment variable
+func (s *Session) GetEnvironment(key string) (string, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if s.Environment == nil {
+		return "", false
+	}
+	value, exists := s.Environment[key]
+	return value, exists
+}
+
+// GetAllEnvironment returns a copy of all environment variables
+func (s *Session) GetAllEnvironment() map[string]string {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	env := make(map[string]string, len(s.Environment))
+	for k, v := range s.Environment {
+		env[k] = v
+	}
+	return env
+}
+
+// UnsetEnvironment removes an environment variable from the session
+func (s *Session) UnsetEnvironment(key string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	delete(s.Environment, key)
+	delete(s.shellEnv, key)
+}
+
+// ClearEnvironment removes all session-specific environment variables
+// and resets to system defaults
+func (s *Session) ClearEnvironment() {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	s.Environment = make(map[string]string)
+	s.shellEnv = make(map[string]string)
+
+	// Restore system environment
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 {
+			s.Environment[parts[0]] = parts[1]
+			s.shellEnv[parts[0]] = parts[1]
+		}
+	}
 }
 
 // Manager manages terminal sessions with project organization and command history
@@ -397,6 +514,7 @@ func (m *Manager) CreateSession(name string, projectID string, workingDir string
 		SuccessCount:        0,
 		TotalDuration:       0,
 		BackgroundProcesses: make(map[string]*BackgroundProcess),
+		activityTracker:     NewSessionActivityTracker(), // M9: Initialize activity tracker
 		currentDir:          workingDir,
 		shellEnv:            make(map[string]string),
 		ctx:                 sessionCtx,
@@ -516,6 +634,61 @@ func (m *Manager) GetSession(sessionID string) (*Session, error) {
 	}
 
 	return session, nil
+}
+
+// SetSessionEnvironment sets or updates environment variable(s) for a session
+func (m *Manager) SetSessionEnvironment(sessionID string, envVars map[string]string) error {
+	m.mutex.RLock()
+	session, exists := m.sessions[sessionID]
+	m.mutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session with ID %s not found", sessionID)
+	}
+
+	session.SetEnvironmentBatch(envVars)
+
+	m.logger.Info("Updated session environment variables", map[string]interface{}{
+		"session_id": sessionID,
+		"variables":  len(envVars),
+	})
+
+	return nil
+}
+
+// GetSessionEnvironment returns all environment variables for a session
+func (m *Manager) GetSessionEnvironment(sessionID string) (map[string]string, error) {
+	m.mutex.RLock()
+	session, exists := m.sessions[sessionID]
+	m.mutex.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("session with ID %s not found", sessionID)
+	}
+
+	return session.GetAllEnvironment(), nil
+}
+
+// UnsetSessionEnvironment removes environment variable(s) from a session
+func (m *Manager) UnsetSessionEnvironment(sessionID string, keys []string) error {
+	m.mutex.RLock()
+	session, exists := m.sessions[sessionID]
+	m.mutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session with ID %s not found", sessionID)
+	}
+
+	for _, key := range keys {
+		session.UnsetEnvironment(key)
+	}
+
+	m.logger.Info("Removed session environment variables", map[string]interface{}{
+		"session_id": sessionID,
+		"variables":  len(keys),
+	})
+
+	return nil
 }
 
 // ListSessions returns all sessions with dynamically calculated statistics
@@ -768,8 +941,9 @@ func (m *Manager) executeCommandInSessionWithStreaming(ctx context.Context, sess
 		shell = "/bin/bash"
 	}
 
-	// Create command that changes to the session's current directory first
-	fullCommand := fmt.Sprintf("cd %s && %s", session.currentDir, command)
+	// H4: Escape the current directory to prevent shell injection
+	escapedDir := shellEscape(session.currentDir)
+	fullCommand := fmt.Sprintf("cd %s && %s", escapedDir, command)
 
 	cmd := exec.CommandContext(ctx, shell, "-c", fullCommand)
 	cmd.Dir = session.WorkingDir
@@ -808,8 +982,9 @@ func (m *Manager) executeCommandInSession(ctx context.Context, session *Session,
 		shell = "/bin/bash"
 	}
 
-	// Create command that changes to the session's current directory first
-	fullCommand := fmt.Sprintf("cd %s && %s", session.currentDir, command)
+	// H4: Escape the current directory to prevent shell injection
+	escapedDir := shellEscape(session.currentDir)
+	fullCommand := fmt.Sprintf("cd %s && %s", escapedDir, command)
 
 	cmd := exec.CommandContext(ctx, shell, "-c", fullCommand)
 	cmd.Dir = session.WorkingDir
@@ -1123,6 +1298,85 @@ func (m *Manager) GetSessionStats() SessionStats {
 	return stats
 }
 
+// M9: GetSessionActivityMetrics returns detailed activity metrics for a session
+func (m *Manager) GetSessionActivityMetrics(sessionID string) (*SessionActivityMetrics, error) {
+	session, err := m.GetSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	session.mutex.RLock()
+	defer session.mutex.RUnlock()
+
+	metrics := &SessionActivityMetrics{
+		SessionID:          session.ID,
+		SessionName:        session.Name,
+		ProjectID:          session.ProjectID,
+		TotalCommands:      session.CommandCount,
+		SuccessfulCommands: session.SuccessCount,
+		FailedCommands:     session.CommandCount - session.SuccessCount,
+		TotalExecutionTime: session.TotalDuration,
+		SessionDuration:    time.Since(session.CreatedAt),
+		LastCommandTime:    session.LastUsedAt,
+		IdleTime:           time.Since(session.LastUsedAt),
+	}
+
+	// Calculate success rate
+	if metrics.TotalCommands > 0 {
+		metrics.SuccessRate = float64(metrics.SuccessfulCommands) / float64(metrics.TotalCommands)
+		metrics.AverageExecutionTime = metrics.TotalExecutionTime / time.Duration(metrics.TotalCommands)
+	}
+
+	// Calculate commands per minute
+	if metrics.SessionDuration > 0 {
+		minutes := metrics.SessionDuration.Minutes()
+		if minutes > 0 {
+			metrics.CommandsPerMinute = float64(metrics.TotalCommands) / minutes
+		}
+	}
+
+	// Get background process stats
+	metrics.TotalBackgroundProcs = len(session.BackgroundProcesses)
+	for _, proc := range session.BackgroundProcesses {
+		proc.Mutex.RLock()
+		if proc.IsRunning {
+			metrics.ActiveBackgroundProcs++
+		}
+		proc.Mutex.RUnlock()
+	}
+
+	// Get detailed metrics from activity tracker if available
+	if session.activityTracker != nil {
+		cmdTypes, errorCats, maxTime, minTime, peakHour := session.activityTracker.GetMetrics()
+		metrics.CommandTypeDistribution = cmdTypes
+		metrics.ErrorCategories = errorCats
+		metrics.MaxExecutionTime = maxTime
+		metrics.MinExecutionTime = minTime
+		metrics.PeakActivityHour = peakHour
+	}
+
+	return metrics, nil
+}
+
+// M9: GetAllSessionActivityMetrics returns activity metrics for all sessions
+func (m *Manager) GetAllSessionActivityMetrics() []*SessionActivityMetrics {
+	m.mutex.RLock()
+	sessionIDs := make([]string, 0, len(m.sessions))
+	for id := range m.sessions {
+		sessionIDs = append(sessionIDs, id)
+	}
+	m.mutex.RUnlock()
+
+	metrics := make([]*SessionActivityMetrics, 0, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if m, err := m.GetSessionActivityMetrics(id); err == nil {
+			metrics = append(metrics, m)
+		}
+	}
+
+	return metrics
+}
+
 // getTotalBackgroundProcesses returns the total number of background processes across all sessions
 func (m *Manager) getTotalBackgroundProcesses() int {
 	m.mutex.RLock()
@@ -1147,11 +1401,26 @@ func (m *Manager) startCleanupRoutine() {
 	m.cleanupTicker = time.NewTicker(m.config.Session.CleanupInterval)
 
 	go func() {
+		// Panic recovery to prevent server crashes
+		defer func() {
+			if r := recover(); r != nil {
+				m.logger.Error("Panic in cleanup routine", fmt.Errorf("panic: %v", r), map[string]interface{}{
+					"routine": "session_cleanup",
+				})
+				// Attempt to restart the cleanup routine after a delay
+				time.Sleep(5 * time.Second)
+				m.startCleanupRoutine()
+			}
+		}()
+
 		for {
 			select {
 			case <-m.cleanupTicker.C:
 				m.cleanupInactiveSessions()
 			case <-m.stopCleanup:
+				m.cleanupTicker.Stop()
+				return
+			case <-m.ctx.Done():
 				m.cleanupTicker.Stop()
 				return
 			}
@@ -1164,11 +1433,26 @@ func (m *Manager) startResourceCleanupRoutine() {
 	m.resourceTicker = time.NewTicker(m.config.Session.ResourceCleanupInterval)
 
 	go func() {
+		// Panic recovery to prevent server crashes
+		defer func() {
+			if r := recover(); r != nil {
+				m.logger.Error("Panic in resource cleanup routine", fmt.Errorf("panic: %v", r), map[string]interface{}{
+					"routine": "resource_cleanup",
+				})
+				// Attempt to restart the resource cleanup routine after a delay
+				time.Sleep(5 * time.Second)
+				m.startResourceCleanupRoutine()
+			}
+		}()
+
 		for {
 			select {
 			case <-m.resourceTicker.C:
 				m.cleanupResources()
 			case <-m.stopResourceCleanup:
+				m.resourceTicker.Stop()
+				return
+			case <-m.ctx.Done():
 				m.resourceTicker.Stop()
 				return
 			}
@@ -1208,20 +1492,53 @@ func (m *Manager) cleanupInactiveSessions() {
 
 // cleanupResources performs automatic resource cleanup based on configuration limits
 func (m *Manager) cleanupResources() {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
+	// C4 FIX: Collect information while holding read lock, then release before operations
 
-	// 1. Enforce maximum sessions limit
-	if len(m.sessions) > m.config.Session.MaxSessions {
+	// 1. Check if we need to cleanup excess sessions
+	m.mutex.RLock()
+	needSessionCleanup := len(m.sessions) > m.config.Session.MaxSessions
+
+	// 2. Collect sessions that need background process cleanup
+	type sessionCleanupInfo struct {
+		sessionID           string
+		needsBgCleanup      bool
+		processesToTruncate []string
+	}
+	var cleanupInfos []sessionCleanupInfo
+
+	for sessionID, session := range m.sessions {
+		session.mutex.RLock()
+		info := sessionCleanupInfo{
+			sessionID:      sessionID,
+			needsBgCleanup: len(session.BackgroundProcesses) > m.config.Session.MaxBackgroundProcesses,
+		}
+		for procID := range session.BackgroundProcesses {
+			info.processesToTruncate = append(info.processesToTruncate, procID)
+		}
+		session.mutex.RUnlock()
+		cleanupInfos = append(cleanupInfos, info)
+	}
+	m.mutex.RUnlock()
+
+	// 3. Enforce maximum sessions limit (no locks held)
+	if needSessionCleanup {
 		m.cleanupExcessSessions()
 	}
 
-	// 2. Cleanup background processes and enforce limits
-	for _, session := range m.sessions {
+	// 4. Cleanup background processes and truncate output (acquire locks individually)
+	for _, info := range cleanupInfos {
+		m.mutex.RLock()
+		session, exists := m.sessions[info.sessionID]
+		m.mutex.RUnlock()
+
+		if !exists {
+			continue
+		}
+
 		session.mutex.Lock()
 
 		// Enforce maximum background processes per session
-		if len(session.BackgroundProcesses) > m.config.Session.MaxBackgroundProcesses {
+		if info.needsBgCleanup && len(session.BackgroundProcesses) > m.config.Session.MaxBackgroundProcesses {
 			m.cleanupExcessBackgroundProcesses(session)
 		}
 
@@ -1233,7 +1550,7 @@ func (m *Manager) cleanupResources() {
 		session.mutex.Unlock()
 	}
 
-	// 3. Cleanup command history if database is available
+	// 5. Cleanup command history if database is available
 	if m.database != nil {
 		m.cleanupExcessCommands()
 	}
@@ -1263,14 +1580,10 @@ func (m *Manager) cleanupExcessSessions() {
 		})
 	}
 
-	// Sort by last used time (oldest first)
-	for i := 0; i < len(sessions)-1; i++ {
-		for j := i + 1; j < len(sessions); j++ {
-			if sessions[i].lastUsed.After(sessions[j].lastUsed) {
-				sessions[i], sessions[j] = sessions[j], sessions[i]
-			}
-		}
-	}
+	// Sort by last used time (oldest first) using efficient sort.Slice
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].lastUsed.Before(sessions[j].lastUsed)
+	})
 
 	// Remove excess sessions (oldest first)
 	excessCount := len(sessions) - m.config.Session.MaxSessions
@@ -1309,14 +1622,10 @@ func (m *Manager) cleanupExcessBackgroundProcesses(session *Session) {
 		})
 	}
 
-	// Sort by start time (oldest first)
-	for i := 0; i < len(processes)-1; i++ {
-		for j := i + 1; j < len(processes); j++ {
-			if processes[i].startTime.After(processes[j].startTime) {
-				processes[i], processes[j] = processes[j], processes[i]
-			}
-		}
-	}
+	// Sort by start time (oldest first) using efficient sort.Slice
+	sort.Slice(processes, func(i, j int) bool {
+		return processes[i].startTime.Before(processes[j].startTime)
+	})
 
 	// Remove excess background processes (oldest first)
 	excessCount := len(processes) - m.config.Session.MaxBackgroundProcesses
@@ -1341,14 +1650,44 @@ func (m *Manager) cleanupExcessBackgroundProcesses(session *Session) {
 
 // cleanupExcessCommands removes old commands from database when over limit
 func (m *Manager) cleanupExcessCommands() {
-	// This would require database methods to cleanup old commands
-	// For now, we'll log that this cleanup should happen
-	m.logger.Debug("Command history cleanup would happen here", map[string]interface{}{
-		"max_commands_per_session": m.config.Session.MaxCommandsPerSession,
-	})
+	// M1: Use the database method to cleanup excess commands
+	if m.database == nil {
+		return
+	}
 
-	// TODO: Implement database cleanup for excess commands
-	// This should remove oldest commands per session when over MaxCommandsPerSession limit
+	// Check database health before cleanup
+	if err := m.database.HealthCheck(); err != nil {
+		m.logger.Debug("Database not available for command cleanup", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Cleanup excess commands per session
+	deleted, err := m.database.CleanupExcessCommands(m.config.Session.MaxCommandsPerSession)
+	if err != nil {
+		m.logger.Error("Failed to cleanup excess commands", err, map[string]interface{}{
+			"max_commands_per_session": m.config.Session.MaxCommandsPerSession,
+		})
+		return
+	}
+
+	if deleted > 0 {
+		m.logger.Info("Cleaned up excess commands", map[string]interface{}{
+			"deleted_count":            deleted,
+			"max_commands_per_session": m.config.Session.MaxCommandsPerSession,
+		})
+	}
+
+	// Also cleanup old stream chunks (older than 24 hours)
+	chunksDeleted, err := m.database.CleanupOldStreamChunks(24 * time.Hour)
+	if err != nil {
+		m.logger.Error("Failed to cleanup old stream chunks", err, nil)
+	} else if chunksDeleted > 0 {
+		m.logger.Debug("Cleaned up old stream chunks", map[string]interface{}{
+			"deleted_count": chunksDeleted,
+		})
+	}
 }
 
 // Shutdown gracefully shuts down the manager
@@ -1422,6 +1761,226 @@ type SessionStats struct {
 	TotalSuccessful    int            `json:"total_successful"`
 	OverallSuccessRate float64        `json:"overall_success_rate"`
 	Projects           map[string]int `json:"projects"` // project_id -> session_count
+}
+
+// M9: SessionActivityMetrics provides detailed activity metrics for a session
+type SessionActivityMetrics struct {
+	SessionID   string `json:"session_id"`
+	SessionName string `json:"session_name"`
+	ProjectID   string `json:"project_id"`
+
+	// Command statistics
+	TotalCommands      int     `json:"total_commands"`
+	SuccessfulCommands int     `json:"successful_commands"`
+	FailedCommands     int     `json:"failed_commands"`
+	SuccessRate        float64 `json:"success_rate"`
+
+	// Timing statistics
+	TotalExecutionTime   time.Duration `json:"-"`
+	AverageExecutionTime time.Duration `json:"-"`
+	MaxExecutionTime     time.Duration `json:"-"`
+	MinExecutionTime     time.Duration `json:"-"`
+
+	// Activity patterns
+	CommandsPerMinute float64       `json:"commands_per_minute"`
+	LastCommandTime   time.Time     `json:"-"`
+	SessionDuration   time.Duration `json:"-"`
+	IdleTime          time.Duration `json:"-"`
+
+	// Background process stats
+	TotalBackgroundProcs  int `json:"total_background_procs"`
+	ActiveBackgroundProcs int `json:"active_background_procs"`
+
+	// Command type distribution
+	CommandTypeDistribution map[string]int `json:"command_type_distribution"`
+
+	// Peak activity
+	PeakActivityHour int `json:"peak_activity_hour"` // Hour of day with most activity
+
+	// Error categories
+	ErrorCategories map[string]int `json:"error_categories"`
+}
+
+// sessionActivityMetricsJSON is used for custom JSON marshaling
+type sessionActivityMetricsJSON struct {
+	SessionID               string         `json:"session_id"`
+	SessionName             string         `json:"session_name"`
+	ProjectID               string         `json:"project_id"`
+	TotalCommands           int            `json:"total_commands"`
+	SuccessfulCommands      int            `json:"successful_commands"`
+	FailedCommands          int            `json:"failed_commands"`
+	SuccessRate             float64        `json:"success_rate"`
+	TotalExecutionTime      int64          `json:"total_execution_time"`
+	AverageExecutionTime    int64          `json:"average_execution_time"`
+	MaxExecutionTime        int64          `json:"max_execution_time"`
+	MinExecutionTime        int64          `json:"min_execution_time"`
+	CommandsPerMinute       float64        `json:"commands_per_minute"`
+	LastCommandTime         string         `json:"last_command_time"`
+	SessionDuration         int64          `json:"session_duration"`
+	IdleTime                int64          `json:"idle_time"`
+	TotalBackgroundProcs    int            `json:"total_background_procs"`
+	ActiveBackgroundProcs   int            `json:"active_background_procs"`
+	CommandTypeDistribution map[string]int `json:"command_type_distribution"`
+	PeakActivityHour        int            `json:"peak_activity_hour"`
+	ErrorCategories         map[string]int `json:"error_categories"`
+}
+
+// MarshalJSON implements custom JSON marshaling for SessionActivityMetrics
+func (m *SessionActivityMetrics) MarshalJSON() ([]byte, error) {
+	return json.Marshal(sessionActivityMetricsJSON{
+		SessionID:               m.SessionID,
+		SessionName:             m.SessionName,
+		ProjectID:               m.ProjectID,
+		TotalCommands:           m.TotalCommands,
+		SuccessfulCommands:      m.SuccessfulCommands,
+		FailedCommands:          m.FailedCommands,
+		SuccessRate:             m.SuccessRate,
+		TotalExecutionTime:      int64(m.TotalExecutionTime),
+		AverageExecutionTime:    int64(m.AverageExecutionTime),
+		MaxExecutionTime:        int64(m.MaxExecutionTime),
+		MinExecutionTime:        int64(m.MinExecutionTime),
+		CommandsPerMinute:       m.CommandsPerMinute,
+		LastCommandTime:         m.LastCommandTime.Format(time.RFC3339),
+		SessionDuration:         int64(m.SessionDuration),
+		IdleTime:                int64(m.IdleTime),
+		TotalBackgroundProcs:    m.TotalBackgroundProcs,
+		ActiveBackgroundProcs:   m.ActiveBackgroundProcs,
+		CommandTypeDistribution: m.CommandTypeDistribution,
+		PeakActivityHour:        m.PeakActivityHour,
+		ErrorCategories:         m.ErrorCategories,
+	})
+}
+
+// SessionActivityTracker tracks detailed activity for a session
+type SessionActivityTracker struct {
+	commandTimes      []time.Duration
+	commandTimestamps []time.Time
+	commandTypes      map[string]int
+	errorCategories   map[string]int
+	maxExecutionTime  time.Duration
+	minExecutionTime  time.Duration
+	hourlyActivity    [24]int // Commands per hour of day
+	mutex             sync.RWMutex
+}
+
+// NewSessionActivityTracker creates a new activity tracker
+func NewSessionActivityTracker() *SessionActivityTracker {
+	return &SessionActivityTracker{
+		commandTimes:      make([]time.Duration, 0),
+		commandTimestamps: make([]time.Time, 0),
+		commandTypes:      make(map[string]int),
+		errorCategories:   make(map[string]int),
+		minExecutionTime:  time.Duration(1<<63 - 1), // Max duration as initial min
+	}
+}
+
+// RecordCommand records command execution metrics
+func (sat *SessionActivityTracker) RecordCommand(duration time.Duration, command string, success bool, errorMsg string) {
+	sat.mutex.Lock()
+	defer sat.mutex.Unlock()
+
+	now := time.Now()
+	sat.commandTimes = append(sat.commandTimes, duration)
+	sat.commandTimestamps = append(sat.commandTimestamps, now)
+
+	// Track max/min execution times
+	if duration > sat.maxExecutionTime {
+		sat.maxExecutionTime = duration
+	}
+	if duration < sat.minExecutionTime {
+		sat.minExecutionTime = duration
+	}
+
+	// Track hourly activity
+	sat.hourlyActivity[now.Hour()]++
+
+	// Categorize command type (extract first word)
+	cmdType := extractCommandType(command)
+	sat.commandTypes[cmdType]++
+
+	// Track error categories
+	if !success && errorMsg != "" {
+		category := categorizeError(errorMsg)
+		sat.errorCategories[category]++
+	}
+
+	// Keep only last 1000 command times to prevent memory bloat
+	if len(sat.commandTimes) > 1000 {
+		sat.commandTimes = sat.commandTimes[len(sat.commandTimes)-1000:]
+		sat.commandTimestamps = sat.commandTimestamps[len(sat.commandTimestamps)-1000:]
+	}
+}
+
+// GetMetrics returns the current activity metrics
+func (sat *SessionActivityTracker) GetMetrics() (commandTypes map[string]int, errorCats map[string]int, maxTime, minTime time.Duration, peakHour int) {
+	sat.mutex.RLock()
+	defer sat.mutex.RUnlock()
+
+	// Copy maps to avoid race conditions
+	commandTypes = make(map[string]int, len(sat.commandTypes))
+	for k, v := range sat.commandTypes {
+		commandTypes[k] = v
+	}
+
+	errorCats = make(map[string]int, len(sat.errorCategories))
+	for k, v := range sat.errorCategories {
+		errorCats[k] = v
+	}
+
+	maxTime = sat.maxExecutionTime
+	minTime = sat.minExecutionTime
+	if minTime == time.Duration(1<<63-1) {
+		minTime = 0
+	}
+
+	// Find peak activity hour
+	maxActivity := 0
+	for hour, count := range sat.hourlyActivity {
+		if count > maxActivity {
+			maxActivity = count
+			peakHour = hour
+		}
+	}
+
+	return
+}
+
+// extractCommandType extracts the command type from a command string
+func extractCommandType(command string) string {
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return "empty"
+	}
+	// Get just the base command name without path
+	cmd := parts[0]
+	if idx := strings.LastIndex(cmd, "/"); idx != -1 {
+		cmd = cmd[idx+1:]
+	}
+	return cmd
+}
+
+// categorizeError categorizes an error message into a category
+func categorizeError(errorMsg string) string {
+	lowerErr := strings.ToLower(errorMsg)
+
+	switch {
+	case strings.Contains(lowerErr, "timeout"):
+		return "timeout"
+	case strings.Contains(lowerErr, "permission") || strings.Contains(lowerErr, "denied"):
+		return "permission"
+	case strings.Contains(lowerErr, "not found") || strings.Contains(lowerErr, "no such"):
+		return "not_found"
+	case strings.Contains(lowerErr, "connection") || strings.Contains(lowerErr, "network"):
+		return "network"
+	case strings.Contains(lowerErr, "memory") || strings.Contains(lowerErr, "oom"):
+		return "memory"
+	case strings.Contains(lowerErr, "syntax") || strings.Contains(lowerErr, "parse"):
+		return "syntax"
+	case strings.Contains(lowerErr, "signal") || strings.Contains(lowerErr, "killed"):
+		return "signal"
+	default:
+		return "other"
+	}
 }
 
 // ExecuteCommandWithTimeout executes a command with a timeout
@@ -1499,8 +2058,12 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 			// Continue with command execution
 		}
 
-		// Create cancellable context with timeout that respects session cancellation
-		ctx, cancel := context.WithTimeout(session.ctx, 24*time.Hour) // Max 24 hour timeout for background processes
+		// H1: Use configurable timeout from config instead of hardcoded 24 hours
+		bgTimeout := m.config.Session.BackgroundProcessTimeout
+		if bgTimeout <= 0 {
+			bgTimeout = 4 * time.Hour // Fallback to 4 hours if not configured
+		}
+		ctx, cancel := context.WithTimeout(session.ctx, bgTimeout)
 		defer cancel()
 
 		startTime := time.Now()
@@ -1525,6 +2088,22 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 		cmd.Env = make([]string, 0, len(session.Environment))
 		for key, value := range session.Environment {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", key, value))
+		}
+
+		// M6: Apply resource limits if enabled
+		if m.config.Session.EnableResourceLimits {
+			limits := ResourceLimits{
+				MaxMemoryMB:   m.config.Session.MaxProcessMemoryMB,
+				MaxFileSizeMB: m.config.Session.MaxProcessFilesMB,
+				Nice:          m.config.Session.ProcessNice,
+				Enabled:       true,
+			}
+			if err := applyResourceLimits(cmd, limits); err != nil {
+				m.logger.Warn("Failed to apply resource limits (continuing anyway)", map[string]interface{}{
+					"error":      err.Error(),
+					"process_id": processID,
+				})
+			}
 		}
 
 		// Create pipes for output capture with proper cleanup
@@ -1582,15 +2161,40 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 		bgProcess.cmd = cmd
 		bgProcess.Mutex.Unlock()
 
+		// M6: Apply runtime resource limits (like nice value) after process starts
+		if m.config.Session.EnableResourceLimits && cmd.Process.Pid > 0 {
+			limits := ResourceLimits{
+				MaxMemoryMB:   m.config.Session.MaxProcessMemoryMB,
+				MaxFileSizeMB: m.config.Session.MaxProcessFilesMB,
+				Nice:          m.config.Session.ProcessNice,
+				Enabled:       true,
+			}
+			if err := setResourceLimits(cmd.Process.Pid, limits); err != nil {
+				m.logger.Warn("Failed to apply runtime resource limits", map[string]interface{}{
+					"error":      err.Error(),
+					"process_id": processID,
+					"pid":        cmd.Process.Pid,
+				})
+			} else {
+				m.logger.Debug("Applied resource limits to background process", map[string]interface{}{
+					"process_id":    processID,
+					"pid":           cmd.Process.Pid,
+					"nice":          limits.Nice,
+					"max_memory_mb": limits.MaxMemoryMB,
+					"max_file_mb":   limits.MaxFileSizeMB,
+				})
+			}
+		}
+
 		// Use WaitGroup to wait for output capture goroutines with timeout protection
 		var outputWg sync.WaitGroup
 		outputWg.Add(2)
 
-		// Channel to signal completion and prevent goroutine leaks
+		// C2 FIX: Use buffered channels and proper synchronization to prevent race conditions
+		// Create done channel to signal all goroutines to stop
 		done := make(chan struct{})
-		defer close(done)
 
-		// Start goroutines to capture output with proper buffering and leak prevention
+		// Stdout capture goroutine with proper synchronization
 		go func() {
 			defer outputWg.Done()
 			defer func() {
@@ -1602,22 +2206,40 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 			scanner := bufio.NewScanner(stdout)
 			scanner.Split(bufio.ScanLines)
 
+			// C2 FIX: Use buffered channel to prevent blocking
+			lineChan := make(chan string, 100)
+
+			// Scanner goroutine
+			go func() {
+				defer close(lineChan)
+				for scanner.Scan() {
+					select {
+					case lineChan <- scanner.Text():
+					case <-done:
+						return
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+
+			// C2 FIX: Drain channel properly until closed or done
 			for {
 				select {
+				case line, ok := <-lineChan:
+					if !ok {
+						return // Channel closed, scanner finished
+					}
+					bgProcess.UpdateOutput(line+"\n", m.config.Session.BackgroundOutputLimit)
 				case <-done:
 					return
 				case <-ctx.Done():
 					return
-				default:
-					if !scanner.Scan() {
-						return // EOF or error
-					}
-					// Use the new method that applies output limiting
-					bgProcess.UpdateOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
 				}
 			}
 		}()
 
+		// Stderr capture goroutine with proper synchronization
 		go func() {
 			defer outputWg.Done()
 			defer func() {
@@ -1629,24 +2251,44 @@ func (m *Manager) ExecuteCommandInBackground(sessionID, command string) (string,
 			scanner := bufio.NewScanner(stderr)
 			scanner.Split(bufio.ScanLines)
 
+			// C2 FIX: Use buffered channel to prevent blocking
+			lineChan := make(chan string, 100)
+
+			// Scanner goroutine
+			go func() {
+				defer close(lineChan)
+				for scanner.Scan() {
+					select {
+					case lineChan <- scanner.Text():
+					case <-done:
+						return
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+
+			// C2 FIX: Drain channel properly until closed or done
 			for {
 				select {
+				case line, ok := <-lineChan:
+					if !ok {
+						return // Channel closed, scanner finished
+					}
+					bgProcess.UpdateErrorOutput(line+"\n", m.config.Session.BackgroundOutputLimit)
 				case <-done:
 					return
 				case <-ctx.Done():
 					return
-				default:
-					if !scanner.Scan() {
-						return // EOF or error
-					}
-					// Use the new method that applies output limiting
-					bgProcess.UpdateErrorOutput(scanner.Text()+"\n", m.config.Session.BackgroundOutputLimit)
 				}
 			}
 		}()
 
 		// Wait for command completion with timeout protection
 		execErr := cmd.Wait()
+
+		// C2 FIX: Signal done to all goroutines after command completes
+		close(done)
 
 		// Wait for output capture goroutines to complete with timeout
 		outputDone := make(chan struct{})
@@ -1792,36 +2434,141 @@ func (m *Manager) GetAllBackgroundProcesses(sessionID, projectID string) (map[st
 	return result, nil
 }
 
+// GracefulTerminationConfig holds configuration for graceful process termination
+type GracefulTerminationConfig struct {
+	GracePeriod     time.Duration // Time to wait after SIGTERM before SIGKILL
+	UseProcessGroup bool          // Kill entire process group
+	LogProgress     bool          // Log termination progress
+}
+
+// DefaultGracefulTerminationConfig returns default graceful termination settings
+func DefaultGracefulTerminationConfig() GracefulTerminationConfig {
+	return GracefulTerminationConfig{
+		GracePeriod:     5 * time.Second,
+		UseProcessGroup: true,
+		LogProgress:     true,
+	}
+}
+
 // TerminateBackgroundProcess terminates a specific background process
+// M7: Implements graceful termination with SIGTERM -> grace period -> SIGKILL
 func (m *Manager) TerminateBackgroundProcess(sessionID, processID string, force bool) error {
+	return m.TerminateBackgroundProcessWithConfig(sessionID, processID, force, DefaultGracefulTerminationConfig())
+}
+
+// TerminateBackgroundProcessWithConfig terminates a background process with custom config
+func (m *Manager) TerminateBackgroundProcessWithConfig(sessionID, processID string, force bool, config GracefulTerminationConfig) error {
 	session, err := m.GetSession(sessionID)
 	if err != nil {
 		return fmt.Errorf("session not found: %v", err)
 	}
 
 	session.mutex.Lock()
-	defer session.mutex.Unlock()
-
 	bgProcess, exists := session.BackgroundProcesses[processID]
 	if !exists {
+		session.mutex.Unlock()
 		return fmt.Errorf("background process %s not found in session %s", processID, sessionID)
 	}
 
-	// Terminate the process if it's running
-	if bgProcess.IsRunning && bgProcess.cmd != nil && bgProcess.cmd.Process != nil {
-		var killErr error
-		if force {
-			killErr = bgProcess.cmd.Process.Kill()
-		} else {
-			killErr = bgProcess.cmd.Process.Signal(os.Interrupt)
-			if killErr != nil {
-				// Fallback to kill if interrupt fails
-				killErr = bgProcess.cmd.Process.Kill()
-			}
-		}
+	// Get process info while holding the lock
+	isRunning := bgProcess.IsRunning
+	cmd := bgProcess.cmd
+	pid := 0
+	if cmd != nil && cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	session.mutex.Unlock()
 
-		if killErr != nil {
-			return fmt.Errorf("failed to terminate process: %v", killErr)
+	// Terminate the process if it's running
+	if isRunning && cmd != nil && cmd.Process != nil {
+		if force {
+			// Force kill immediately
+			if config.LogProgress {
+				m.logger.Info("Force killing background process", map[string]interface{}{
+					"session_id": sessionID,
+					"process_id": processID,
+					"pid":        pid,
+				})
+			}
+
+			if config.UseProcessGroup {
+				// Try to kill the entire process group
+				pgid, err := syscall.Getpgid(pid)
+				if err == nil {
+					syscall.Kill(-pgid, syscall.SIGKILL)
+				} else {
+					cmd.Process.Kill()
+				}
+			} else {
+				cmd.Process.Kill()
+			}
+		} else {
+			// M7: Graceful termination: SIGTERM -> wait -> SIGKILL
+			if config.LogProgress {
+				m.logger.Info("Sending SIGTERM for graceful shutdown", map[string]interface{}{
+					"session_id":   sessionID,
+					"process_id":   processID,
+					"pid":          pid,
+					"grace_period": config.GracePeriod.String(),
+				})
+			}
+
+			// Send SIGTERM first
+			var termErr error
+			if config.UseProcessGroup {
+				pgid, err := syscall.Getpgid(pid)
+				if err == nil {
+					termErr = syscall.Kill(-pgid, syscall.SIGTERM)
+				} else {
+					termErr = cmd.Process.Signal(syscall.SIGTERM)
+				}
+			} else {
+				termErr = cmd.Process.Signal(syscall.SIGTERM)
+			}
+
+			if termErr != nil {
+				// If SIGTERM fails, go straight to kill
+				if config.LogProgress {
+					m.logger.Warn("SIGTERM failed, force killing", map[string]interface{}{
+						"session_id": sessionID,
+						"process_id": processID,
+						"error":      termErr.Error(),
+					})
+				}
+				cmd.Process.Kill()
+			} else {
+				// Wait for grace period, checking if process exited
+				exited := m.waitForProcessExit(cmd, config.GracePeriod)
+
+				if !exited {
+					// Process didn't exit gracefully, send SIGKILL
+					if config.LogProgress {
+						m.logger.Info("Grace period expired, sending SIGKILL", map[string]interface{}{
+							"session_id":   sessionID,
+							"process_id":   processID,
+							"pid":          pid,
+							"grace_period": config.GracePeriod.String(),
+						})
+					}
+
+					if config.UseProcessGroup {
+						pgid, err := syscall.Getpgid(pid)
+						if err == nil {
+							syscall.Kill(-pgid, syscall.SIGKILL)
+						} else {
+							cmd.Process.Kill()
+						}
+					} else {
+						cmd.Process.Kill()
+					}
+				} else if config.LogProgress {
+					m.logger.Info("Process exited gracefully after SIGTERM", map[string]interface{}{
+						"session_id": sessionID,
+						"process_id": processID,
+						"pid":        pid,
+					})
+				}
+			}
 		}
 
 		// Update process status
@@ -1831,7 +2578,59 @@ func (m *Manager) TerminateBackgroundProcess(sessionID, processID string, force 
 	}
 
 	// Remove from session background processes
+	session.mutex.Lock()
 	delete(session.BackgroundProcesses, processID)
+	session.mutex.Unlock()
 
 	return nil
+}
+
+// waitForProcessExit waits for a process to exit with a timeout
+func (m *Manager) waitForProcessExit(cmd *exec.Cmd, timeout time.Duration) bool {
+	done := make(chan struct{})
+
+	go func() {
+		cmd.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// TerminateAllBackgroundProcesses gracefully terminates all background processes in a session
+func (m *Manager) TerminateAllBackgroundProcesses(sessionID string, force bool, gracePeriod time.Duration) error {
+	session, err := m.GetSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("session not found: %v", err)
+	}
+
+	config := DefaultGracefulTerminationConfig()
+	if gracePeriod > 0 {
+		config.GracePeriod = gracePeriod
+	}
+
+	session.mutex.RLock()
+	processIDs := make([]string, 0, len(session.BackgroundProcesses))
+	for processID := range session.BackgroundProcesses {
+		processIDs = append(processIDs, processID)
+	}
+	session.mutex.RUnlock()
+
+	var lastErr error
+	for _, processID := range processIDs {
+		if err := m.TerminateBackgroundProcessWithConfig(sessionID, processID, force, config); err != nil {
+			m.logger.Error("Failed to terminate background process", err, map[string]interface{}{
+				"session_id": sessionID,
+				"process_id": processID,
+			})
+			lastErr = err
+		}
+	}
+
+	return lastErr
 }

@@ -8,10 +8,23 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/rama-kairi/go-term/internal/tracing"
 )
 
 // RunCommand executes a foreground command in the specified terminal session
 func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest, args RunCommandArgs) (*mcp.CallToolResult, RunCommandResult, error) {
+	// M10: Start tracing span for command execution
+	ctx, span := t.tracer.StartSpanWithKind(ctx, "run_command", tracing.SpanKindServer)
+	defer span.End()
+	span.SetAttribute(tracing.AttrSessionID, args.SessionID)
+	span.SetAttribute(tracing.AttrCommand, args.Command)
+
+	// H2: Check rate limit first
+	if err := t.CheckRateLimit(); err != nil {
+		span.SetStatus(tracing.StatusError, "rate limited")
+		return createErrorResult(err.Error()), RunCommandResult{}, nil
+	}
+
 	// Validate input
 	if err := validateSessionID(args.SessionID); err != nil {
 		return createErrorResult(fmt.Sprintf("Invalid session ID: %v. Tip: Session ID must be a valid UUID4. Use 'list_terminal_sessions' to find valid session IDs, or create a new session with 'create_terminal_session'.", err)), RunCommandResult{}, nil
@@ -128,6 +141,24 @@ func (t *TerminalTools) RunCommand(ctx context.Context, req *mcp.CallToolRequest
 		"timeout_used":    timeoutSeconds,
 		"timed_out":       timedOut,
 	})
+
+	// M10: Update span with execution details
+	span.SetAttributes(map[string]interface{}{
+		tracing.AttrExitCode:     exitCode,
+		tracing.AttrOutputSize:   len(output),
+		tracing.AttrWorkingDir:   session.WorkingDir,
+		tracing.AttrProjectID:    session.ProjectID,
+		tracing.AttrIsBackground: false,
+	})
+	if success {
+		span.SetStatus(tracing.StatusOK, "command completed successfully")
+	} else {
+		span.SetStatus(tracing.StatusError, errorOutput)
+		span.SetAttribute(tracing.AttrErrorMessage, errorOutput)
+	}
+	if timedOut {
+		span.AddEvent("command_timeout", tracing.Attribute{Key: "timeout_seconds", Value: timeoutSeconds})
+	}
 
 	return &mcp.CallToolResult{
 		Content: content,

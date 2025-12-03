@@ -1,38 +1,319 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rama-kairi/go-term/internal/config"
 	"github.com/rama-kairi/go-term/internal/database"
 	"github.com/rama-kairi/go-term/internal/logger"
 	"github.com/rama-kairi/go-term/internal/terminal"
+	"github.com/rama-kairi/go-term/internal/tracing"
 	"github.com/rama-kairi/go-term/internal/utils"
 )
 
+// H2: RateLimiter implements a token bucket rate limiter
+type RateLimiter struct {
+	tokens     float64
+	maxTokens  float64
+	refillRate float64 // tokens per second
+	lastRefill time.Time
+	mu         sync.Mutex
+}
+
+// NewRateLimiter creates a new rate limiter with the given rate and burst
+func NewRateLimiter(ratePerMinute int, burst int) *RateLimiter {
+	return &RateLimiter{
+		tokens:     float64(burst),
+		maxTokens:  float64(burst),
+		refillRate: float64(ratePerMinute) / 60.0, // Convert to per-second
+		lastRefill: time.Now(),
+	}
+}
+
+// Allow checks if a request is allowed and consumes a token if so
+func (rl *RateLimiter) Allow() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(rl.lastRefill).Seconds()
+	rl.lastRefill = now
+
+	// Refill tokens
+	rl.tokens += elapsed * rl.refillRate
+	if rl.tokens > rl.maxTokens {
+		rl.tokens = rl.maxTokens
+	}
+
+	// Check if we have tokens available
+	if rl.tokens >= 1 {
+		rl.tokens--
+		return true
+	}
+	return false
+}
+
+// GetTokens returns current available tokens (for monitoring)
+func (rl *RateLimiter) GetTokens() float64 {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.tokens
+}
+
 // TerminalTools contains all MCP tools for terminal management with enhanced features
 type TerminalTools struct {
-	manager        *terminal.Manager
-	config         *config.Config
-	logger         *logger.Logger
-	database       *database.DB
-	security       *SecurityValidator
-	projectGen     *utils.ProjectIDGenerator
-	packageManager *utils.PackageManagerDetector
+	manager           *terminal.Manager
+	config            *config.Config
+	logger            *logger.Logger
+	database          *database.DB
+	security          *SecurityValidator
+	projectGen        *utils.ProjectIDGenerator
+	packageManager    *utils.PackageManagerDetector
+	rateLimiter       *RateLimiter       // H2: Rate limiter for tool calls
+	templateManager   *TemplateManager   // F1: Command templates manager
+	snapshotManager   *SnapshotManager   // F2: Session snapshots manager
+	dependencyManager *DependencyManager // F7: Process dependency manager
+	tracer            *tracing.Tracer    // M10: Command execution tracing
 }
 
 // NewTerminalTools creates a new instance of terminal tools with enhanced features
 func NewTerminalTools(manager *terminal.Manager, cfg *config.Config, logger *logger.Logger, db *database.DB) *TerminalTools {
 	return &TerminalTools{
-		manager:        manager,
-		config:         cfg,
-		logger:         logger,
-		database:       db,
-		security:       NewSecurityValidator(cfg),
-		projectGen:     utils.NewProjectIDGenerator(),
-		packageManager: utils.NewPackageManagerDetector(),
+		manager:           manager,
+		config:            cfg,
+		logger:            logger,
+		database:          db,
+		security:          NewSecurityValidator(cfg),
+		projectGen:        utils.NewProjectIDGenerator(),
+		packageManager:    utils.NewPackageManagerDetector(),
+		rateLimiter:       NewRateLimiter(cfg.Session.RateLimitPerMinute, cfg.Session.RateLimitBurst),
+		templateManager:   NewTemplateManager(),
+		snapshotManager:   NewSnapshotManager(cfg.Database.DataDir),
+		dependencyManager: NewDependencyManager(),
+		tracer:            tracing.NewTracer("go-term"),
 	}
+}
+
+// CheckRateLimit checks if the rate limit is exceeded and returns an error if so
+func (t *TerminalTools) CheckRateLimit() error {
+	if !t.rateLimiter.Allow() {
+		t.logger.Warn("Rate limit exceeded", map[string]interface{}{
+			"available_tokens": t.rateLimiter.GetTokens(),
+		})
+		return fmt.Errorf("rate limit exceeded. Please slow down your requests. Current limit: %d calls per minute",
+			t.config.Session.RateLimitPerMinute)
+	}
+	return nil
+}
+
+// =============================================================================
+// F1: Command Template Tool Wrappers (defined in template_tools.go)
+// =============================================================================
+
+// CreateCommandTemplateArgs represents arguments for creating a command template
+type CreateCommandTemplateArgs struct {
+	Name        string `json:"name" jsonschema:"required,description=Unique name for the template"`
+	Command     string `json:"command" jsonschema:"required,description=Command template with optional {{variable}} placeholders"`
+	Description string `json:"description,omitempty" jsonschema:"description=Description of what the template does"`
+	Category    string `json:"category,omitempty" jsonschema:"description=Category for organizing templates"`
+}
+
+// CreateCommandTemplate creates a new command template
+func (t *TerminalTools) CreateCommandTemplate(ctx context.Context, req *mcp.CallToolRequest, args CreateCommandTemplateArgs) (*mcp.CallToolResult, *CommandTemplate, error) {
+	template := &CommandTemplate{
+		Name:        args.Name,
+		Command:     args.Command,
+		Description: args.Description,
+		Category:    args.Category,
+	}
+
+	if err := t.templateManager.AddTemplate(template); err != nil {
+		return createErrorResult(fmt.Sprintf("Failed to create template: %v", err)), nil, nil
+	}
+
+	t.logger.Info("Command template created", map[string]interface{}{
+		"name":     args.Name,
+		"category": args.Category,
+	})
+
+	return createJSONResult(template), template, nil
+}
+
+// ExpandCommandTemplateArgs represents arguments for expanding a template
+type ExpandCommandTemplateArgs struct {
+	TemplateName string            `json:"template_name" jsonschema:"required,description=Name of the template to expand"`
+	Variables    map[string]string `json:"variables,omitempty" jsonschema:"description=Map of variable names to values"`
+}
+
+// ExpandCommandTemplateResult represents the result of expanding a template
+type ExpandCommandTemplateResult struct {
+	OriginalTemplate string `json:"original_template"`
+	ExpandedCommand  string `json:"expanded_command"`
+	VariablesUsed    int    `json:"variables_used"`
+}
+
+// ExpandCommandTemplate expands a command template with variables
+func (t *TerminalTools) ExpandCommandTemplate(ctx context.Context, req *mcp.CallToolRequest, args ExpandCommandTemplateArgs) (*mcp.CallToolResult, ExpandCommandTemplateResult, error) {
+	template, exists := t.templateManager.GetTemplate(args.TemplateName)
+	if !exists {
+		return createErrorResult(fmt.Sprintf("Template not found: %s", args.TemplateName)), ExpandCommandTemplateResult{}, nil
+	}
+
+	expanded, _ := t.templateManager.ExpandTemplate(template.Command, args.Variables)
+
+	result := ExpandCommandTemplateResult{
+		OriginalTemplate: template.Command,
+		ExpandedCommand:  expanded,
+		VariablesUsed:    len(args.Variables),
+	}
+
+	return createJSONResult(result), result, nil
+}
+
+// =============================================================================
+// F6: Output Search Tool Wrapper
+// =============================================================================
+
+// SearchCommandOutput searches through command outputs
+func (t *TerminalTools) SearchCommandOutput(ctx context.Context, req *mcp.CallToolRequest, args SearchOutputArgs) (*mcp.CallToolResult, SearchOutputResult, error) {
+	// Get session to validate it exists
+	session, err := t.manager.GetSession(args.SessionID)
+	if err != nil {
+		return createErrorResult(fmt.Sprintf("Session not found: %v", err)), SearchOutputResult{}, nil
+	}
+
+	// Get command history from database using SearchCommands
+	maxResults := args.MaxResults
+	if maxResults <= 0 {
+		maxResults = 100
+	}
+	commands, err := t.database.SearchCommands(args.SessionID, "", "", "", nil, time.Time{}, time.Time{}, maxResults)
+	if err != nil {
+		return createErrorResult(fmt.Sprintf("Failed to get command history: %v", err)), SearchOutputResult{}, nil
+	}
+
+	// Perform search through the outputs
+	result := searchCommandOutputsInternal(commands, args, session.WorkingDir)
+
+	return createJSONResult(result), result, nil
+}
+
+// searchCommandOutputsInternal performs the actual search through command outputs
+func searchCommandOutputsInternal(commands []*database.CommandRecord, args SearchOutputArgs, workingDir string) SearchOutputResult {
+	var matches []SearchOutputMatch
+	pattern := args.Pattern
+
+	if !args.CaseSensitive {
+		pattern = strings.ToLower(pattern)
+	}
+
+	contextLines := args.IncludeContext
+	if contextLines <= 0 {
+		contextLines = 2
+	}
+
+	for _, cmd := range commands {
+		output := cmd.Output
+		searchOutput := output
+		if !args.CaseSensitive {
+			searchOutput = strings.ToLower(output)
+		}
+
+		if strings.Contains(searchOutput, pattern) {
+			// Find the line numbers with matches
+			lines := strings.Split(output, "\n")
+			for lineNum, line := range lines {
+				searchLine := line
+				if !args.CaseSensitive {
+					searchLine = strings.ToLower(line)
+				}
+				if strings.Contains(searchLine, pattern) {
+					match := SearchOutputMatch{
+						CommandID:   cmd.ID,
+						SessionID:   cmd.SessionID,
+						Command:     cmd.Command,
+						LineNumber:  lineNum + 1,
+						MatchedText: line,
+						Timestamp:   cmd.Timestamp.Format(time.RFC3339),
+					}
+
+					// Add context lines
+					start := lineNum - contextLines
+					if start < 0 {
+						start = 0
+					}
+					end := lineNum + contextLines + 1
+					if end > len(lines) {
+						end = len(lines)
+					}
+					match.Context = lines[start:end]
+
+					matches = append(matches, match)
+				}
+			}
+		}
+	}
+
+	truncated := false
+	maxResults := args.MaxResults
+	if maxResults > 0 && len(matches) > maxResults {
+		matches = matches[:maxResults]
+		truncated = true
+	}
+
+	return SearchOutputResult{
+		Pattern:      args.Pattern,
+		IsRegex:      args.IsRegex,
+		TotalMatches: len(matches),
+		Matches:      matches,
+		SearchTime:   time.Now().Format(time.RFC3339),
+		Truncated:    truncated,
+	}
+}
+
+// =============================================================================
+// F2: Session Snapshot Tool Wrappers
+// =============================================================================
+
+// SaveSessionSnapshotArgs represents arguments for saving a session snapshot
+type SaveSessionSnapshotArgs struct {
+	SessionID   string `json:"session_id" jsonschema:"required,description=Session ID to snapshot"`
+	Name        string `json:"name" jsonschema:"required,description=Name for the snapshot"`
+	Description string `json:"description,omitempty" jsonschema:"description=Optional description"`
+}
+
+// SaveSessionSnapshot saves a session snapshot
+func (t *TerminalTools) SaveSessionSnapshot(ctx context.Context, req *mcp.CallToolRequest, args SaveSessionSnapshotArgs) (*mcp.CallToolResult, *SessionSnapshot, error) {
+	session, err := t.manager.GetSession(args.SessionID)
+	if err != nil {
+		return createErrorResult(fmt.Sprintf("Session not found: %v", err)), nil, nil
+	}
+
+	snapshot := &SessionSnapshot{
+		SessionID:   args.SessionID,
+		Name:        args.Name,
+		Description: args.Description,
+		WorkingDir:  session.WorkingDir,
+		Environment: session.Environment,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := t.snapshotManager.saveSnapshot(snapshot); err != nil {
+		return createErrorResult(fmt.Sprintf("Failed to save snapshot: %v", err)), nil, nil
+	}
+
+	t.logger.Info("Session snapshot saved", map[string]interface{}{
+		"session_id":  args.SessionID,
+		"snapshot_id": snapshot.ID,
+		"name":        args.Name,
+	})
+
+	return createJSONResult(snapshot), snapshot, nil
 }
 
 // SecurityValidator provides command security validation

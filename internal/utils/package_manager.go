@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // PackageManager represents different package managers and their characteristics
@@ -19,14 +21,25 @@ type PackageManager struct {
 	TestCommand    string
 }
 
+// M5: cachedResult stores a cached package manager detection result
+type cachedResult struct {
+	manager    *PackageManager
+	detectedAt time.Time
+}
+
 // PackageManagerDetector handles detection of package managers in projects
 type PackageManagerDetector struct {
 	managers []PackageManager
+	cache    map[string]*cachedResult // M5: Cache by directory path
+	cacheTTL time.Duration            // M5: Cache time-to-live
+	mu       sync.RWMutex             // M5: Mutex for cache access
 }
 
-// NewPackageManagerDetector creates a new package manager detector
+// NewPackageManagerDetector creates a new package manager detector with caching (M5)
 func NewPackageManagerDetector() *PackageManagerDetector {
 	return &PackageManagerDetector{
+		cache:    make(map[string]*cachedResult),
+		cacheTTL: 5 * time.Minute, // Cache results for 5 minutes
 		managers: []PackageManager{
 			// Node.js package managers (in order of preference)
 			{
@@ -135,9 +148,20 @@ func NewPackageManagerDetector() *PackageManagerDetector {
 	}
 }
 
-// DetectPackageManager detects the appropriate package manager for a directory
+// DetectPackageManager detects the appropriate package manager for a directory with caching (M5)
 func (d *PackageManagerDetector) DetectPackageManager(workingDir string) (*PackageManager, error) {
+	// M5: Check cache first
+	d.mu.RLock()
+	if cached, ok := d.cache[workingDir]; ok {
+		if time.Since(cached.detectedAt) < d.cacheTTL {
+			d.mu.RUnlock()
+			return cached.manager, nil
+		}
+	}
+	d.mu.RUnlock()
+
 	// First, check for lock files and config files to determine the project type
+	var result *PackageManager
 	for _, manager := range d.managers {
 		// Check if lock file exists
 		if manager.LockFile != "" {
@@ -145,7 +169,8 @@ func (d *PackageManagerDetector) DetectPackageManager(workingDir string) (*Packa
 			if _, err := os.Stat(lockPath); err == nil {
 				// Verify the executable is available
 				if d.isExecutableAvailable(manager.ExecutableName) {
-					return &manager, nil
+					result = &manager
+					break
 				}
 			}
 		}
@@ -155,14 +180,35 @@ func (d *PackageManagerDetector) DetectPackageManager(workingDir string) (*Packa
 			configPath := filepath.Join(workingDir, manager.ConfigFile)
 			if _, err := os.Stat(configPath); err == nil {
 				if d.isExecutableAvailable(manager.ExecutableName) {
-					return &manager, nil
+					result = &manager
+					break
 				}
 			}
 		}
 	}
 
-	// No specific package manager detected
-	return nil, nil
+	// M5: Cache the result (including nil)
+	d.mu.Lock()
+	d.cache[workingDir] = &cachedResult{
+		manager:    result,
+		detectedAt: time.Now(),
+	}
+	d.mu.Unlock()
+
+	return result, nil
+}
+
+// InvalidateCache clears the cache for a specific directory or all directories (M5)
+func (d *PackageManagerDetector) InvalidateCache(workingDir string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if workingDir == "" {
+		// Clear entire cache
+		d.cache = make(map[string]*cachedResult)
+	} else {
+		delete(d.cache, workingDir)
+	}
 }
 
 // DetectProjectType determines the project type based on files in the directory

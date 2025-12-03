@@ -102,8 +102,13 @@ func (t *TerminalTools) CheckBackgroundProcess(ctx context.Context, req *mcp.Cal
 	}, result, nil
 }
 
-// RunBackgroundProcess starts a command as a background process without any validation
+// RunBackgroundProcess starts a command as a background process with security validation
 func (t *TerminalTools) RunBackgroundProcess(ctx context.Context, req *mcp.CallToolRequest, args RunBackgroundProcessArgs) (*mcp.CallToolResult, RunBackgroundProcessResult, error) {
+	// H2: Check rate limit first
+	if err := t.CheckRateLimit(); err != nil {
+		return createErrorResult(err.Error()), RunBackgroundProcessResult{}, nil
+	}
+
 	// Validate session ID
 	if err := validateSessionID(args.SessionID); err != nil {
 		return createErrorResult(fmt.Sprintf("Invalid session ID: %v. Use 'list_terminal_sessions' to find valid session IDs.", err)), RunBackgroundProcessResult{}, nil
@@ -115,7 +120,16 @@ func (t *TerminalTools) RunBackgroundProcess(ctx context.Context, req *mcp.CallT
 		return createErrorResult(fmt.Sprintf("Session not found: %v. Use 'list_terminal_sessions' to see all available sessions.", err)), RunBackgroundProcessResult{}, nil
 	}
 
-	// Start the background process (no command validation)
+	// SECURITY: Validate command before starting background process (C1 fix)
+	if err := t.security.ValidateCommand(args.Command); err != nil {
+		t.logger.LogSecurityEvent("blocked_background_command", args.Command, "high", map[string]interface{}{
+			"session_id": args.SessionID,
+			"reason":     err.Error(),
+		})
+		return createErrorResult(fmt.Sprintf("Command blocked by security policy: %v", err)), RunBackgroundProcessResult{}, nil
+	}
+
+	// Start the background process
 	processID, err := t.manager.ExecuteCommandInBackground(args.SessionID, args.Command)
 	if err != nil {
 		return createErrorResult(fmt.Sprintf("Failed to start background process: %v", err)), RunBackgroundProcessResult{}, nil

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	termerr "github.com/rama-kairi/go-term/internal/errors"
 )
 
 // CommandEntry represents a single command execution in history
@@ -97,7 +99,7 @@ func (hm *HistoryManager) CreateSessionHistory(sessionID, projectID, sessionName
 	defer hm.mutex.Unlock()
 
 	if _, exists := hm.sessions[sessionID]; exists {
-		return fmt.Errorf("session history already exists for session %s", sessionID)
+		return termerr.SessionExists(sessionID)
 	}
 
 	history := &SessionHistory{
@@ -119,7 +121,7 @@ func (hm *HistoryManager) AddCommand(entry CommandEntry) error {
 	hm.mutex.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session history not found for session %s", entry.SessionID)
+		return termerr.HistoryNotFound(entry.SessionID)
 	}
 
 	session.mutex.Lock()
@@ -215,7 +217,7 @@ func (hm *HistoryManager) GetSessionHistory(sessionID string) (*SessionHistory, 
 
 	session, exists := hm.sessions[sessionID]
 	if !exists {
-		return nil, fmt.Errorf("session history not found for session %s", sessionID)
+		return nil, termerr.HistoryNotFound(sessionID)
 	}
 
 	session.mutex.RLock()
@@ -286,7 +288,7 @@ func (hm *HistoryManager) DeleteSessionHistory(sessionID string) error {
 
 	session, exists := hm.sessions[sessionID]
 	if !exists {
-		return fmt.Errorf("session history not found for session %s", sessionID)
+		return termerr.HistoryNotFound(sessionID)
 	}
 
 	// Delete from memory
@@ -295,7 +297,8 @@ func (hm *HistoryManager) DeleteSessionHistory(sessionID string) error {
 	// Delete from disk
 	filename := hm.getSessionHistoryFile(session.ProjectID, sessionID)
 	if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to delete session history file: %w", err)
+		return termerr.FileSystemError(err, filename).
+			WithDetails("failed to delete session history file")
 	}
 
 	return nil
@@ -394,18 +397,20 @@ func (hm *HistoryManager) saveSessionHistory(session *SessionHistory) error {
 	// Create project directory if it doesn't exist
 	projectDir := filepath.Join(hm.projectsDir, session.ProjectID)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create project directory: %w", err)
+		return termerr.FileSystemError(err, projectDir).
+			WithDetails("failed to create project directory")
 	}
 
 	filename := hm.getSessionHistoryFile(session.ProjectID, session.SessionID)
 
 	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal session history: %w", err)
+		return termerr.Wrap(err, termerr.ErrCodeHistoryCorrupted, "failed to marshal session history").
+			WithContext("session_id", session.SessionID)
 	}
 
 	if err := os.WriteFile(filename, data, 0o644); err != nil {
-		return fmt.Errorf("failed to write session history file: %w", err)
+		return termerr.HistoryWriteFailed(err, session.SessionID)
 	}
 
 	return nil
@@ -431,12 +436,14 @@ func (hm *HistoryManager) loadExistingHistory() {
 func (hm *HistoryManager) loadSessionHistoryFile(filename string) error {
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return err
+		return termerr.HistoryReadFailed(err, filename)
 	}
 
 	var session SessionHistory
 	if err := json.Unmarshal(data, &session); err != nil {
-		return err
+		return termerr.Wrap(err, termerr.ErrCodeHistoryCorrupted, "failed to unmarshal session history").
+			WithContext("file", filename).
+			WithSuggestion("The history file may be corrupted. Consider deleting it.")
 	}
 
 	hm.sessions[session.SessionID] = &session

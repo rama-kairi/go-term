@@ -10,6 +10,11 @@ import (
 
 // CreateSession creates a new terminal session with project association and comprehensive documentation
 func (t *TerminalTools) CreateSession(ctx context.Context, req *mcp.CallToolRequest, args CreateSessionArgs) (*mcp.CallToolResult, CreateSessionResult, error) {
+	// H2: Check rate limit first
+	if err := t.CheckRateLimit(); err != nil {
+		return createErrorResult(err.Error()), CreateSessionResult{}, nil
+	}
+
 	// Validate session name
 	if err := validateSessionName(args.Name); err != nil {
 		return createErrorResult(fmt.Sprintf("Invalid session name: %v. Tip: Session names should be 3-100 characters, alphanumeric with underscores and hyphens only. Examples: 'my-project', 'dev_server', 'testing_session'", err)), CreateSessionResult{}, nil

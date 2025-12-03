@@ -43,18 +43,32 @@ type ServerConfig struct {
 
 // SessionConfig holds session management configuration
 type SessionConfig struct {
-	MaxSessions             int           `json:"max_sessions"`
-	DefaultTimeout          time.Duration `json:"default_timeout"`
-	CleanupInterval         time.Duration `json:"cleanup_interval"`
-	MaxCommandLength        int           `json:"max_command_length"`
-	MaxOutputSize           int           `json:"max_output_size"`
-	WorkingDir              string        `json:"working_dir"`
-	Shell                   string        `json:"shell"`
-	EnableStreaming         bool          `json:"enable_streaming"`
-	MaxCommandsPerSession   int           `json:"max_commands_per_session"`
-	MaxBackgroundProcesses  int           `json:"max_background_processes"`
-	BackgroundOutputLimit   int           `json:"background_output_limit"`
-	ResourceCleanupInterval time.Duration `json:"resource_cleanup_interval"`
+	MaxSessions              int           `json:"max_sessions"`
+	DefaultTimeout           time.Duration `json:"default_timeout"`
+	CleanupInterval          time.Duration `json:"cleanup_interval"`
+	MaxCommandLength         int           `json:"max_command_length"`
+	MaxOutputSize            int           `json:"max_output_size"`
+	OutputChunkSize          int           `json:"output_chunk_size"` // H5: Chunk size for streaming output
+	WorkingDir               string        `json:"working_dir"`
+	Shell                    string        `json:"shell"`
+	EnableStreaming          bool          `json:"enable_streaming"`
+	MaxCommandsPerSession    int           `json:"max_commands_per_session"`
+	MaxBackgroundProcesses   int           `json:"max_background_processes"`
+	BackgroundProcessTimeout time.Duration `json:"background_process_timeout"` // H1: Configurable background timeout
+	BackgroundOutputLimit    int           `json:"background_output_limit"`
+	ResourceCleanupInterval  time.Duration `json:"resource_cleanup_interval"`
+	RateLimitPerMinute       int           `json:"rate_limit_per_minute"` // H2: Rate limit for tool calls
+	RateLimitBurst           int           `json:"rate_limit_burst"`      // H2: Burst size for rate limiter
+
+	// M6: Resource limits for background processes
+	MaxProcessMemoryMB   int64 `json:"max_process_memory_mb"`   // Maximum memory per process in MB (0 = no limit)
+	MaxProcessCPUPercent int   `json:"max_process_cpu_percent"` // CPU limit as percentage (0 = no limit)
+	MaxProcessFilesMB    int64 `json:"max_process_files_mb"`    // Maximum file size in MB (0 = no limit)
+	ProcessNice          int   `json:"process_nice"`            // Nice value for processes (-20 to 19, default 10)
+	EnableResourceLimits bool  `json:"enable_resource_limits"`  // Whether to apply resource limits
+
+	// M7: Graceful termination settings
+	TerminationGracePeriod time.Duration `json:"termination_grace_period"` // Time to wait after SIGTERM before SIGKILL
 }
 
 // DatabaseConfig holds database configuration
@@ -119,18 +133,32 @@ func DefaultConfig() *Config {
 			Debug:   false,
 		},
 		Session: SessionConfig{
-			MaxSessions:             10,               // User requested: max 10 sessions
-			DefaultTimeout:          60 * time.Minute, // Increased from 30 minutes
-			CleanupInterval:         5 * time.Minute,
-			MaxCommandLength:        50000,            // Increased from 10000
-			MaxOutputSize:           10 * 1024 * 1024, // 10MB, increased from 1MB
-			WorkingDir:              "",               // Use current directory
-			Shell:                   "",               // Use system default
-			EnableStreaming:         true,             // Enable real-time streaming
-			MaxCommandsPerSession:   30,               // User requested: max 30 commands per session
-			MaxBackgroundProcesses:  3,                // User requested: max 3 background processes
-			BackgroundOutputLimit:   2000,             // Keep only latest 2000 characters of background output
-			ResourceCleanupInterval: 1 * time.Minute,  // Cleanup every minute
+			MaxSessions:              10,               // User requested: max 10 sessions
+			DefaultTimeout:           60 * time.Minute, // Increased from 30 minutes
+			CleanupInterval:          5 * time.Minute,
+			MaxCommandLength:         50000,           // Increased from 10000
+			MaxOutputSize:            5 * 1024 * 1024, // H5: Reduced to 5MB from 10MB
+			OutputChunkSize:          64 * 1024,       // H5: 64KB chunks for streaming
+			WorkingDir:               "",              // Use current directory
+			Shell:                    "",              // Use system default
+			EnableStreaming:          true,            // Enable real-time streaming
+			MaxCommandsPerSession:    30,              // User requested: max 30 commands per session
+			MaxBackgroundProcesses:   3,               // User requested: max 3 background processes
+			BackgroundProcessTimeout: 4 * time.Hour,   // H1: Configurable, default 4 hours
+			BackgroundOutputLimit:    2000,            // Keep only latest 2000 characters of background output
+			ResourceCleanupInterval:  1 * time.Minute, // Cleanup every minute
+			RateLimitPerMinute:       60,              // H2: 60 calls per minute
+			RateLimitBurst:           10,              // H2: Burst of 10 calls
+
+			// M6: Resource limits for background processes
+			MaxProcessMemoryMB:   512,  // Default: 512MB per process
+			MaxProcessCPUPercent: 0,    // Default: no CPU limit (hard to implement cross-platform)
+			MaxProcessFilesMB:    100,  // Default: 100MB file size limit
+			ProcessNice:          10,   // Default: nice value of 10 (lower priority)
+			EnableResourceLimits: true, // Enable by default for safety
+
+			// M7: Graceful termination settings
+			TerminationGracePeriod: 5 * time.Second, // Wait 5 seconds after SIGTERM before SIGKILL
 		},
 		Database: DatabaseConfig{
 			Enable:            true,
@@ -151,8 +179,29 @@ func DefaultConfig() *Config {
 			EnableSandbox:   false,      // Disabled for better usability
 			AllowedCommands: []string{}, // Empty means all allowed (subject to blocked)
 			BlockedCommands: []string{
-				// Only block truly dangerous commands
-				"rm -rf /", "format", "mkfs", "dd if=/dev/zero", ":(){ :|:& };:",
+				// H3: Expanded dangerous commands list
+				// File system destruction
+				"rm -rf /", "rm -rf /*", "rm -rf ~", "rm -fr /",
+				// Disk operations
+				"mkfs", "fdisk", "dd if=/dev/zero", "dd if=/dev/random", "dd of=/dev/sda",
+				"> /dev/sda", "> /dev/null", "shred",
+				// Fork bombs and resource exhaustion
+				":(){ :|:& };:", "fork", "bomb",
+				// System control
+				"shutdown", "reboot", "halt", "poweroff", "init 0", "init 6",
+				"systemctl poweroff", "systemctl reboot", "systemctl halt",
+				// Process killing
+				"kill -9 1", "kill -9 -1", "killall",
+				// Permission escalation
+				"chmod 777 /", "chmod -R 777", "chown root", "chown -R root",
+				// Network attacks
+				"nc -l", "ncat", "nmap",
+				// Dangerous pipes
+				"curl | bash", "wget | bash", "curl | sh", "wget | sh",
+				// History/log tampering
+				"history -c", "unset HISTFILE", "> ~/.bash_history",
+				// Cron manipulation
+				"crontab -r",
 			},
 			AllowNetworkAccess:   true, // Allow network access
 			AllowFileSystemWrite: true,
@@ -298,6 +347,21 @@ func loadFromEnvironment(config *Config) {
 			config.Session.ResourceCleanupInterval = duration
 		}
 	}
+	// New H1, H2, H5 environment variables
+	if val := os.Getenv("TERMINAL_MCP_BACKGROUND_PROCESS_TIMEOUT"); val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			config.Session.BackgroundProcessTimeout = duration
+		}
+	}
+	if val := os.Getenv("TERMINAL_MCP_OUTPUT_CHUNK_SIZE"); val != "" {
+		config.Session.OutputChunkSize = parseInt(val, config.Session.OutputChunkSize)
+	}
+	if val := os.Getenv("TERMINAL_MCP_RATE_LIMIT_PER_MINUTE"); val != "" {
+		config.Session.RateLimitPerMinute = parseInt(val, config.Session.RateLimitPerMinute)
+	}
+	if val := os.Getenv("TERMINAL_MCP_RATE_LIMIT_BURST"); val != "" {
+		config.Session.RateLimitBurst = parseInt(val, config.Session.RateLimitBurst)
+	}
 
 	// Database configuration
 	if val := os.Getenv("TERMINAL_MCP_DATA_DIR"); val != "" {
@@ -396,6 +460,24 @@ func validateConfig(config *Config) error {
 
 	if config.Session.ResourceCleanupInterval <= 0 {
 		return fmt.Errorf("resource_cleanup_interval must be greater than 0")
+	}
+
+	// H1: Validate background process timeout
+	if config.Session.BackgroundProcessTimeout <= 0 {
+		return fmt.Errorf("background_process_timeout must be greater than 0")
+	}
+
+	// H5: Validate output chunk size
+	if config.Session.OutputChunkSize <= 0 {
+		return fmt.Errorf("output_chunk_size must be greater than 0")
+	}
+
+	// H2: Validate rate limiting
+	if config.Session.RateLimitPerMinute <= 0 {
+		return fmt.Errorf("rate_limit_per_minute must be greater than 0")
+	}
+	if config.Session.RateLimitBurst <= 0 {
+		return fmt.Errorf("rate_limit_burst must be greater than 0")
 	}
 
 	if config.Security.MaxProcesses <= 0 {
