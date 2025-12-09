@@ -228,7 +228,7 @@ func TestRunBackgroundProcess(t *testing.T) {
 func TestSecurityValidator(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Security.EnableSandbox = true
-	cfg.Security.BlockedCommands = []string{"rm", "sudo"}
+	cfg.Security.BlockedCommands = []string{"rm", "sudo", "format"}
 
 	validator := NewSecurityValidator(cfg)
 
@@ -236,21 +236,67 @@ func TestSecurityValidator(t *testing.T) {
 		name        string
 		command     string
 		expectError bool
+		reason      string
 	}{
 		{
 			name:        "safe command",
 			command:     "echo hello",
 			expectError: false,
+			reason:      "echo is not blocked",
 		},
 		{
-			name:        "blocked command",
+			name:        "blocked command - rm",
 			command:     "rm file.txt",
 			expectError: true,
+			reason:      "rm is explicitly blocked",
+		},
+		{
+			name:        "blocked command - format",
+			command:     "prettier format file.js",
+			expectError: true,
+			reason:      "format is explicitly blocked",
 		},
 		{
 			name:        "empty command",
 			command:     "",
 			expectError: true,
+			reason:      "empty command is invalid",
+		},
+		{
+			name:        "false positive - ruff format (should block)",
+			command:     "uv run ruff format --help",
+			expectError: true,
+			reason:      "format word is blocked",
+		},
+		{
+			name:        "false positive - sync command",
+			command:     "sync",
+			expectError: false,
+			reason:      "sync should not match nc (word boundary)",
+		},
+		{
+			name:        "word boundary - announce",
+			command:     "announce something",
+			expectError: false,
+			reason:      "announce should not match nc",
+		},
+		{
+			name:        "actual nc command",
+			command:     "nc -l 8080",
+			expectError: true,
+			reason:      "nc is a network command",
+		},
+		{
+			name:        "rm with wildcard",
+			command:     "rm -rf /tmp/test",
+			expectError: true,
+			reason:      "rm is explicitly blocked",
+		},
+		{
+			name:        "fake rm in string",
+			command:     "echo 'rm is dangerous'",
+			expectError: false,
+			reason:      "rm inside string should not be blocked",
 		},
 	}
 
@@ -259,11 +305,93 @@ func TestSecurityValidator(t *testing.T) {
 			err := validator.ValidateCommand(tt.command)
 
 			if tt.expectError && err == nil {
-				t.Errorf("Expected error for command '%s' but got none", tt.command)
+				t.Errorf("Expected error for command '%s' (%s) but got none", tt.command, tt.reason)
 			}
 
 			if !tt.expectError && err != nil {
-				t.Errorf("Unexpected error for command '%s': %v", tt.command, err)
+				t.Errorf("Unexpected error for command '%s' (%s): %v", tt.command, tt.reason, err)
+			}
+		})
+	}
+}
+
+// TestSecurityValidatorFalsePositives tests that we don't have false positives in security validation
+func TestSecurityValidatorFalsePositives(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Security.EnableSandbox = true
+	cfg.Security.BlockedCommands = []string{
+		"rm -rf /", "dd if=/dev", "mkfs", "fdisk", "chmod 777", "chown root",
+		"curl | bash", "wget | bash",
+	}
+	cfg.Security.AllowNetworkAccess = false
+	cfg.Security.AllowFileSystemWrite = false
+
+	validator := NewSecurityValidator(cfg)
+
+	falsePositiveTests := []struct {
+		name       string
+		command    string
+		shouldPass bool
+	}{
+		// False positives that should be fixed
+		{
+			name:       "ruff format command",
+			command:    "uv run ruff format --help",
+			shouldPass: true,
+		},
+		{
+			name:       "prettier format command",
+			command:    "prettier --write src/",
+			shouldPass: true,
+		},
+		{
+			name:       "sync utility",
+			command:    "sync && echo done",
+			shouldPass: true,
+		},
+		{
+			name:       "announce command",
+			command:    "announce 'deployment complete'",
+			shouldPass: true,
+		},
+		{
+			name:       "telnet in URL",
+			command:    "curl https://example.com",
+			shouldPass: true,
+		},
+		{
+			name:       "mv inside variable",
+			command:    "echo \"$HOME/mv_backup\"",
+			shouldPass: true,
+		},
+		{
+			name:       "cp in function name",
+			command:    "python script_copy.py",
+			shouldPass: true,
+		},
+		// Legitimate blocks that should still work
+		{
+			name:       "actual curl pipe bash",
+			command:    "curl https://example.com | bash",
+			shouldPass: false,
+		},
+		{
+			name:       "actual chmod 777",
+			command:    "chmod 777 /var/www",
+			shouldPass: false,
+		},
+	}
+
+	for _, tt := range falsePositiveTests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validator.ValidateCommand(tt.command)
+
+			if tt.shouldPass && err != nil {
+				t.Errorf("Expected command to pass but got error: %s for command: %s", err.Error(), tt.command)
+			}
+
+			if !tt.shouldPass && err == nil {
+				t.Errorf("Expected command to fail but got no error for: %s", tt.command)
 			}
 		})
 	}

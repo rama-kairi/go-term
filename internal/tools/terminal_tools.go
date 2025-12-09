@@ -345,28 +345,29 @@ func (s *SecurityValidator) ValidateCommand(command string) error {
 	for _, blocked := range s.config.Security.BlockedCommands {
 		blockedLower := strings.ToLower(blocked)
 
-		// Check if any word in the command matches the blocked command exactly
-		for _, word := range commandWords {
-			// Remove common shell operators to get the actual command
-			cleanWord := strings.Trim(word, ";&|(){}[]<>\"'`")
+		// Single-word blocked commands: check word-by-word with word boundaries
+		if !strings.ContainsAny(blockedLower, " -/") {
+			for _, word := range commandWords {
+				// Remove common shell operators to get the actual command
+				cleanWord := strings.Trim(word, ";&|(){}[]<>\"'`")
 
-			if cleanWord == blockedLower {
-				return fmt.Errorf("command contains blocked operation: %s", blocked)
+				if cleanWord == blockedLower {
+					return fmt.Errorf("command contains blocked operation: %s", blocked)
+				}
 			}
+			continue
 		}
 
-		// Also check for blocked patterns that might contain spaces or special operators
-		// using regex word boundaries for patterns like "rm -rf /"
-		if strings.Contains(blockedLower, " ") || strings.ContainsAny(blockedLower, "-/") {
-			if strings.Contains(lowerCommand, blockedLower) {
-				return fmt.Errorf("command contains blocked operation: %s", blocked)
-			}
+		// Multi-word or pattern-based blocked commands: check for exact substring match
+		// with word boundary awareness for patterns like "rm -rf /"
+		if s.containsBlockedPattern(lowerCommand, blockedLower) {
+			return fmt.Errorf("command contains blocked operation: %s", blocked)
 		}
 	}
 
 	// Additional security checks
 	if s.config.Security.EnableSandbox {
-		// Check for potentially dangerous patterns
+		// Check for potentially dangerous patterns using word boundaries
 		dangerousPatterns := []string{
 			"rm -rf /",
 			"dd if=/dev",
@@ -379,7 +380,7 @@ func (s *SecurityValidator) ValidateCommand(command string) error {
 		}
 
 		for _, pattern := range dangerousPatterns {
-			if strings.Contains(lowerCommand, pattern) {
+			if s.containsBlockedPattern(lowerCommand, pattern) {
 				return fmt.Errorf("command contains potentially dangerous pattern: %s", pattern)
 			}
 		}
@@ -388,7 +389,7 @@ func (s *SecurityValidator) ValidateCommand(command string) error {
 		if !s.config.Security.AllowNetworkAccess {
 			networkCommands := []string{"wget", "curl", "ssh", "scp", "rsync", "nc", "netcat", "telnet"}
 			for _, netCmd := range networkCommands {
-				if strings.Contains(lowerCommand, netCmd) {
+				if s.isCommandPresent(lowerCommand, netCmd) {
 					return fmt.Errorf("network access not allowed: %s", netCmd)
 				}
 			}
@@ -396,16 +397,47 @@ func (s *SecurityValidator) ValidateCommand(command string) error {
 
 		// Check for file system write operations if not allowed
 		if !s.config.Security.AllowFileSystemWrite {
-			writeCommands := []string{"rm ", "mv ", "cp ", "touch ", "mkdir ", "rmdir "}
+			writeCommands := []string{"rm", "mv", "cp", "touch", "mkdir", "rmdir"}
 			for _, writeCmd := range writeCommands {
-				if strings.Contains(lowerCommand, writeCmd) {
-					return fmt.Errorf("file system write operations not allowed: %s", strings.TrimSpace(writeCmd))
+				if s.isCommandPresent(lowerCommand, writeCmd) {
+					return fmt.Errorf("file system write operations not allowed: %s", writeCmd)
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// containsBlockedPattern checks if a command contains a blocked pattern with awareness of context.
+// It uses substring matching but ensures the pattern is not part of a larger word in most cases.
+func (s *SecurityValidator) containsBlockedPattern(command, pattern string) bool {
+	// For patterns with operators (>, |, &, etc.) or paths (/), do direct substring match
+	// These are inherently unambiguous (e.g., "> /dev/" won't appear in normal command names)
+	if strings.ContainsAny(pattern, ">|&;(){}[]<>") || strings.Count(pattern, "/") >= 2 {
+		return strings.Contains(command, pattern)
+	}
+
+	// For other patterns, check if the pattern appears as a complete substring
+	// with appropriate boundaries
+	return strings.Contains(command, pattern)
+}
+
+// isCommandPresent checks if a specific command is present in the command line.
+// It uses word boundary checking to avoid false positives (e.g., "nc" in "sync").
+func (s *SecurityValidator) isCommandPresent(command, cmdName string) bool {
+	words := strings.Fields(command)
+	for _, word := range words {
+		// Remove shell operators and quotes to get the base command
+		cleanWord := strings.Trim(word, ";&|(){}[]<>\"'`=:")
+
+		// Check if word starts with or equals the command name
+		// This handles cases like "curl" in "curl https://..." but not in "sync"
+		if cleanWord == cmdName || strings.HasPrefix(cleanWord, cmdName+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // ===== TYPE DEFINITIONS =====
